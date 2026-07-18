@@ -36,6 +36,7 @@ enum PollStep : uint8_t {
   kStepWsprRank,          // /admin/wspr-rank       → WSPR Live 24h/today/yesterday rank
   kStepRbnRank,           // /admin/rbn-data        → RBN skimmer rank
   kStepGpsdo,             // /admin/gpsdo-health    → GPSDO lock + GPS fix status
+  kStepHealth,            // /admin/monitor-health  → per-component health grid
   kNumSteps
 };
 
@@ -890,6 +891,67 @@ void pollRbnRank() {
   g_snap.lastSuccessMs = millis();
 }
 
+// ── Monitor health (/admin/monitor-health) ───────────────────────────────────
+// Requires admin auth.  Parses the overall status, per-item name+status, and
+// up to kMaxHealthIssues issue strings per item.
+void pollHealth() {
+  String body;
+  const int code = httpGet("/admin/monitor-health", true, body);
+  if (code != 200) {
+    debugLogf("monitor-health: HTTP %d", code);
+    return;
+  }
+
+  JsonDocument doc;
+  const DeserializationError err = deserializeJson(doc, body);
+  if (err) {
+    debugLogf("monitor-health: JSON err %s", err.c_str());
+    return;
+  }
+
+  // Parse overall status string → uint8_t (0=ok, 1=warning, 2=critical).
+  auto parseStatus = [](const char* s) -> uint8_t {
+    if (!s) return 0;
+    if (strcmp(s, "critical") == 0) return 2;
+    if (strcmp(s, "warning")  == 0) return 1;
+    return 0;
+  };
+
+  g_snap.healthOverall = parseStatus(doc["overall"] | "ok");
+
+  JsonArray items = doc["items"].as<JsonArray>();
+  int n = 0;
+  if (!items.isNull()) {
+    for (JsonObject item : items) {
+      if (n >= kMaxHealthItems) break;
+      const char* name = item["name"] | "";
+      const char* stat = item["status"] | "ok";
+      // Truncate name to fit the fixed char[20] buffer (19 chars + NUL).
+      strncpy(g_snap.healthItems[n].name, name,
+              sizeof(g_snap.healthItems[n].name) - 1);
+      g_snap.healthItems[n].name[sizeof(g_snap.healthItems[n].name) - 1] = '\0';
+      g_snap.healthItems[n].status = parseStatus(stat);
+
+      // Parse issues[] array — store up to kMaxHealthIssues strings.
+      int ni = 0;
+      JsonArray issues = item["issues"].as<JsonArray>();
+      if (!issues.isNull()) {
+        for (JsonVariant v : issues) {
+          if (ni >= kMaxHealthIssues) break;
+          g_snap.healthItems[n].issues[ni] = v.as<const char*>();
+          ni++;
+        }
+      }
+      g_snap.healthItems[n].issueCount = ni;
+      n++;
+    }
+  }
+  g_snap.healthItemCount = n;
+  g_snap.healthValid = true;
+  debugLogf("monitor-health: overall=%d items=%d", g_snap.healthOverall, n);
+  g_snap.lastSuccessMs = millis();
+}
+
 void runStep(uint8_t step) {
   switch (step) {
     case kStepDescription: pollDescription(); break;
@@ -903,6 +965,7 @@ void runStep(uint8_t step) {
     case kStepWsprRank:    pollWsprRank();    break;
     case kStepRbnRank:     pollRbnRank();     break;
     case kStepGpsdo:       pollGpsdo();       break;
+    case kStepHealth:      pollHealth();      break;
     default: break;
   }
 }

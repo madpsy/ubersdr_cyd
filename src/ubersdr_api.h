@@ -28,6 +28,20 @@
 // Maximum number of amateur bands tracked for the band-conditions slide.
 constexpr int kMaxBands = 12;
 
+// Maximum number of health items stored from /admin/monitor-health.
+constexpr int kMaxHealthItems = 24;
+
+// Maximum issues stored per health item (extra issues are dropped).
+constexpr int kMaxHealthIssues = 4;
+
+// A single component health item.
+struct HealthItem {
+  char     name[20];                        // truncated display name (null-terminated)
+  uint8_t  status;                          // 0 = ok, 1 = warning, 2 = critical
+  String   issues[kMaxHealthIssues];        // issue strings (may be empty)
+  int      issueCount;                      // number of populated issues[] entries
+};
+
 // Number of downsampled points stored per band for the spectrum slide.  Each
 // mini-chart is ~150 px wide; 128 points gives good detail at tiny RAM cost.
 constexpr int kSpectrumPoints = 128;
@@ -160,6 +174,12 @@ struct UberSDRSnapshot {
   float    gpsdoHdop;
   float    gpsdoAltitudeM;
   String   gpsdoUtc;           // ISO-8601 datetime from GPS, e.g. "2026-07-18T11:36:05Z"
+
+  // ── Monitor health (/admin/monitor-health) ──
+  bool       healthValid;
+  uint8_t    healthOverall;              // 0=ok, 1=warning, 2=critical
+  HealthItem healthItems[kMaxHealthItems];
+  int        healthItemCount;
 
   // ── Meta ──
   uint32_t lastSuccessMs;   // millis() of the most recent successful fetch (any)

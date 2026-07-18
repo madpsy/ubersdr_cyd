@@ -8,6 +8,7 @@
 #include "slide_base.h"
 #include "slide_bands.h"
 #include "slide_gpsdo.h"
+#include "slide_health.h"
 #include "slide_load.h"
 #include "slide_ranking.h"
 #include "slide_spaceweather.h"
@@ -29,6 +30,7 @@ AntennaSlide      s_antenna;
 SpectrumSlide     s_spectrum;
 RankingSlide      s_ranking;
 GpsdoSlide        s_gpsdo;
+HealthSlide       s_health;
 
 Slide* const kSlides[] = {
   &s_users,
@@ -40,6 +42,7 @@ Slide* const kSlides[] = {
   &s_weather,
   &s_antenna,
   &s_gpsdo,
+  &s_health,
 };
 constexpr int kSlideCount = sizeof(kSlides) / sizeof(kSlides[0]);
 
