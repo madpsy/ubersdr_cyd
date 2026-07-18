@@ -2,6 +2,8 @@
 
 ESP32-2432S028R ("Cheap Yellow Display") firmware — the display front-end for an UberSDR receiver.
 
+![CYD running UberSDR firmware](images/cyd.png)
+
 ## Getting started
 
 ### Option 1 — Flash from your browser (easiest)
