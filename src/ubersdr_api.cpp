@@ -13,6 +13,7 @@
 #include <WiFiClientSecure.h>
 
 #include "debug_log.h"
+#include "notifications.h"
 #include "settings.h"
 
 namespace {
@@ -46,6 +47,16 @@ uint8_t         g_step          = 0;
 uint32_t        g_lastStepMs    = 0;
 bool            g_forceRefresh  = false;
 int             g_spectrumBand  = 0;   // round-robin index for per-band FFT
+
+// ── API reachability tracking ─────────────────────────────────────────────────
+// We consider the API "down" after kFailThreshold consecutive steps all fail
+// (i.e. lastSuccessMs has not advanced).  A toast is fired once on the
+// down-transition and once on the up-transition (recovery).  The threshold is
+// intentionally larger than one step so a single slow request doesn't spam.
+constexpr uint8_t  kFailThreshold  = 6;   // ~12 s of consecutive failures
+uint8_t            g_failStreak    = 0;   // steps since last success
+bool               g_apiWasDown    = false;
+uint32_t           g_lastKnownSuccessMs = 0;   // snapshot of lastSuccessMs at last check
 
 // ── HTTP helper ───────────────────────────────────────────────────────────────
 // Performs a blocking GET and returns the response body in `out`.
@@ -1014,6 +1025,9 @@ void ubersdrApiBegin() {
   g_step = 0;
   g_lastStepMs = 0;
   g_forceRefresh = true;
+  g_failStreak = 0;
+  g_apiWasDown = false;
+  g_lastKnownSuccessMs = 0;
 
   const AppSettings& cfg = getSettings();
   debugLogf("ubersdr api begin: host=%s:%u pw=%s",
@@ -1033,6 +1047,32 @@ void ubersdrApiLoop() {
 
   runStep(g_step);
   g_step = (g_step + 1) % kNumSteps;
+
+  // ── Reachability toast logic ──────────────────────────────────────────────
+  // After each step, check whether lastSuccessMs has advanced since we last
+  // looked.  If it has, the API is reachable; if not, increment the streak.
+  // Fire a toast only on the down-transition (streak crosses the threshold)
+  // and on the up-transition (recovery after being down).
+  if (g_snap.lastSuccessMs != g_lastKnownSuccessMs) {
+    // At least one endpoint succeeded this step.
+    if (g_apiWasDown) {
+      notificationsPush("API", "UberSDR server recovered");
+      debugLog("api: recovered — toast sent");
+    }
+    g_failStreak         = 0;
+    g_apiWasDown         = false;
+    g_lastKnownSuccessMs = g_snap.lastSuccessMs;
+  } else {
+    // No new success since last check.
+    if (g_failStreak < kFailThreshold) {
+      ++g_failStreak;
+    }
+    if (g_failStreak >= kFailThreshold && !g_apiWasDown) {
+      notificationsPush("API", "Cannot reach UberSDR server");
+      debugLog("api: unreachable — toast sent");
+      g_apiWasDown = true;
+    }
+  }
 }
 
 const UberSDRSnapshot& getUberSDRSnapshot() {
