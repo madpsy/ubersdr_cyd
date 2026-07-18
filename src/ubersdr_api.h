@@ -8,11 +8,18 @@
 // results via a shared snapshot struct.  All network I/O happens in
 // ubersdrApiLoop() which must be called every loop() iteration.
 //
-// Endpoints polled (see include/app_config.h for host/port/password):
+// Endpoints polled (host/port/password come from settings.h — data/ubersdr.json
+// on LittleFS, NVS via the web portal, or app_config.h defaults, in that order):
+//   GET /api/description            (public)           — capacity, callsign, timezone
+//   GET /admin/sessions?compact=1   (X-Admin-Password) — user counts + throughput
 //   GET /admin/system-load          (X-Admin-Password) — load averages + CPU temp
-//   GET /admin/sessions             (X-Admin-Password) — active user counts
 //   GET /api/noisefloor/latest      (public)           — per-band FT8 SNR
+//   GET /api/noisefloor/fft?band=…  (public)           — per-band spectrum charts
 //   GET /api/spaceweather           (public)           — K/A index, solar flux
+//   GET /api/weather                (public)           — terrestrial weather
+//   GET /admin/psk-rank             (X-Admin-Password) — PSKReporter rank
+//   GET /admin/wspr-rank            (X-Admin-Password) — WSPR Live rank
+//   GET /admin/rbn-data             (X-Admin-Password) — RBN skimmer rank
 //
 // Call order:
 //   ubersdrApiBegin()  — once, in setup()

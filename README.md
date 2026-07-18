@@ -2,6 +2,95 @@
 
 ESP32-2432S028R ("Cheap Yellow Display") firmware — the display front-end for an UberSDR receiver.
 
+## Getting started
+
+### 1. Clone and configure
+
+```bash
+git clone https://github.com/yourname/ubersdr_cyd
+cd ubersdr_cyd
+cp data/wifi.json.example data/wifi.json
+cp data/ubersdr.json.example data/ubersdr.json
+```
+
+Edit the two JSON config files (both gitignored, uploaded to the device's LittleFS filesystem):
+
+- **`data/wifi.json`** — WiFi credentials (optional — you can also configure WiFi on-screen or via the setup hotspot, see below):
+  ```json
+  {
+    "ssid": "your-wifi-ssid",
+    "password": "your-wifi-password"
+  }
+  ```
+- **`data/ubersdr.json`** — UberSDR server details:
+  ```json
+  {
+    "host": "ubersdr.local",
+    "port": 8080,
+    "password": "your-admin-password"
+  }
+  ```
+
+At boot the device resolves each setting in priority order:
+
+1. The JSON file on LittleFS (ignored if it still contains placeholder values).
+2. Values saved via the web setup portal or on-screen keyboard (stored in NVS).
+3. Compile-time defaults in `include/app_config.h` (last-resort fallback — you normally don't need to touch this file).
+
+The admin password is sent only as the `X-Admin-Password` header to the configured host and is never committed to version control.
+
+### 2. Build and flash
+
+```bash
+./deploy.sh
+```
+
+This builds the firmware, uploads it, and uploads the LittleFS filesystem (`data/`, including your JSON config). Other modes:
+
+```bash
+./deploy.sh build     # build only (no upload)
+./deploy.sh firmware  # build + upload firmware only
+./deploy.sh fs        # upload filesystem only (use after editing the JSON config)
+```
+
+The upload port comes from `platformio.ini`; override it with `UPLOAD_PORT=/dev/ttyUSB1 ./deploy.sh`. Watch the serial output with `pio device monitor`.
+
+### 3. Configure WiFi on-screen (if not using wifi.json)
+
+1. Power on the device.
+2. Tap the lower half of the status screen ("Tap here to configure WiFi").
+3. Use the on-screen keyboard to enter your SSID, then tap **OK**.
+4. Enter your password, then tap **OK**.
+5. The device connects and returns to the status screen.
+
+### 4. Configure WiFi via browser (alternative)
+
+1. Connect your phone/laptop to the `UberSDR-Setup` WiFi network (password `ubersdr1`).
+2. Open `http://192.168.4.1/` in a browser.
+3. Enter your home WiFi credentials and tap **Save settings**.
+4. Once the device joins your network the hotspot turns off automatically (unless you tick "Keep hotspot always on").
+
+## Configuring notifications in UberSDR
+
+The display accepts webhook notifications from the UberSDR server and shows them as toast cards (see the Webhook notifications feature below). To set this up on the server:
+
+1. Open the **Notification Admin** — in the UberSDR admin panel, click **🔔 Notifications** (`notifications-admin.html`).
+2. Click **+ Add Channel** and set the channel type to **Webhook**.
+3. Set **Service Preset** to **Custom**.
+4. Set **Webhook URL** to the display's default mDNS name with the `/notify` suffix:
+   ```
+   http://ubersdr-cyd.local/notify
+   ```
+   If mDNS isn't working from the server (Go's resolver often won't resolve `.local` names), use the display's IP address instead: `http://<display-ip>/notify`.
+5. Set **Payload Format** to **JSON**.
+6. Save the channel, then create or edit notification rules to send to it.
+
+You can verify the display side independently of the server with:
+
+```bash
+curl "http://ubersdr-cyd.local/notify?msg=hello"
+```
+
 ## Hardware
 
 | Board | ESP32-2432S028R (CYD) |
@@ -27,7 +116,7 @@ The header shows the instance callsign, a live **user-count chip** (`1/20`, gree
   ```bash
   curl "http://ubersdr-cyd.local/notify?msg=hello"
   ```
-  On the server, add a webhook notification channel with `webhook_url: http://<display-ip>/notify` and `webhook_format: json` (use the IP — Go's resolver usually won't do mDNS `.local`).
+  Server-side setup is described in [Configuring notifications in UberSDR](#configuring-notifications-in-ubersdr) above.
 - **On-screen WiFi setup** — tap the screen to open a touch keyboard and enter your SSID and password directly on the display. No phone or laptop needed.
 - **Setup hotspot** — the device also broadcasts `UberSDR-Setup` (password `ubersdr1`) so you can configure WiFi from a browser at `192.168.4.1` or `http://ubersdr-cyd.local/` once connected. (mDNS name is `ubersdr-cyd` to avoid clashing with the UberSDR server's own `ubersdr.local`.)
 - **Debug log** — a rolling 100-line log of API polls and results is served at `http://<display-ip>/debug` (or `http://ubersdr-cyd.local/debug`), auto-refreshing every 3 seconds.
@@ -47,33 +136,7 @@ paginate: override `pageCount()` to return >1 and implement `setPage()`, and the
 slideshow will split the slide's on-screen window evenly across its pages (e.g.
 the Spectrum slide shows 6 band charts per page).
 
-## Getting started
-
-### 1. Clone and configure
-
-```bash
-git clone https://github.com/yourname/ubersdr_cyd
-cd ubersdr_cyd
-cp include/app_config.example.h include/app_config.h
-```
-
-Edit `include/app_config.h` with your WiFi credentials (optional — you can also configure on-screen).
-
-**UberSDR server details** (host / port / admin password) are runtime settings, configured the same way as Wi-Fi. The device resolves them in priority order:
-
-1. **`data/ubersdr.json`** on LittleFS (developer config, gitignored — copy from `data/ubersdr.json.example`):
-   ```json
-   {
-     "host": "ubersdr.local",
-     "port": 8080,
-     "password": "your-admin-password"
-   }
-   ```
-   Upload it with `pio run --target uploadfs`.
-2. **Web setup portal** — the `UberSDR Server` card on the settings page (host, port, admin password). Saved to NVS and survives reboots.
-3. **Compile-time defaults** in `include/app_config.h` (`UBERSDR_HOST`/`UBERSDR_PORT`/`UBERSDR_PASSWORD`) — only used as a last-resort fallback.
-
-The admin password is sent only as the `X-Admin-Password` header to the configured host and is never committed to version control.
+## Polled API endpoints
 
 The overview slideshow polls these endpoints round-robin, one every 2 s (~20 s full cycle):
 
@@ -90,36 +153,18 @@ The overview slideshow polls these endpoints round-robin, one every 2 s (~20 s f
 | `GET /admin/wspr-rank` | `X-Admin-Password` | WSPR Live rank |
 | `GET /admin/rbn-data` | `X-Admin-Password` | RBN skimmer rank |
 
-### 2. Build and flash
-
-```bash
-pio run --target upload
-pio device monitor
-```
-
-### 3. Configure WiFi on-screen
-
-1. Power on the device.
-2. Tap the lower half of the status screen ("Tap here to configure WiFi").
-3. Use the on-screen keyboard to enter your SSID, then tap **OK**.
-4. Enter your password, then tap **OK**.
-5. The device connects and returns to the status screen.
-
-### 4. Configure WiFi via browser (alternative)
-
-1. Connect your phone/laptop to the `UberSDR-Setup` WiFi network (password `ubersdr1`).
-2. Open `http://192.168.4.1/` in a browser.
-3. Enter your home WiFi credentials and tap **Save settings**.
-4. Once the device joins your network the hotspot turns off automatically (unless you tick "Keep hotspot always on").
-
 ## Project structure
 
 ```
 ubersdr_cyd/
+├── data/                     # LittleFS filesystem image (uploaded to the device)
+│   ├── wifi.json.example     # Template — copy to wifi.json (gitignored)
+│   └── ubersdr.json.example  # Template — copy to ubersdr.json (gitignored)
+├── deploy.sh                 # Build + upload firmware and filesystem
 ├── include/
 │   ├── User_Setup.h          # TFT_eSPI pin/driver config for CYD
 │   ├── app_config.example.h  # Template — copy to app_config.h
-│   └── app_config.h          # Local credentials (gitignored)
+│   └── app_config.h          # Optional compile-time defaults (gitignored)
 ├── src/
 │   ├── main.cpp
 │   ├── settings.{h,cpp}      # NVS-backed settings store
