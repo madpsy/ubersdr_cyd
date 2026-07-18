@@ -12,7 +12,7 @@ void drawCompass(TFT_eSPI& tft, int16_t cx, int16_t cy, int16_t r, int az) {
 
   // Cardinal ticks + labels (N omitted — needle indicates north; label would
   // overlap the card title above the dial).
-  const char* card[4] = {nullptr, "E", "S", "W"};
+  const char* card[4] = {nullptr, "E", nullptr, "W"};
   for (int i = 0; i < 4; ++i) {
     const float a = i * 90.0f * (float)M_PI / 180.0f;
     const int16_t x0 = cx + static_cast<int16_t>(sinf(a) * (r - 2));
