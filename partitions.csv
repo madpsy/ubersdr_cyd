@@ -1,0 +1,12 @@
+# Partition table for UberSDR CYD (4 MB flash).
+# Identical to the framework's min_spiffs.csv except the coredump partition
+# is replaced by "usercfg": a raw 64 KB region the web flasher writes WiFi +
+# UberSDR settings into (magic + length + JSON). The firmware imports it into
+# NVS on first boot and erases it — see importFlasherConfig() in settings.cpp.
+# Name,   Type, SubType, Offset,  Size, Flags
+nvs,      data, nvs,     0x9000,  0x5000,
+otadata,  data, ota,     0xe000,  0x2000,
+app0,     app,  ota_0,   0x10000, 0x1E0000,
+app1,     app,  ota_1,   0x1F0000,0x1E0000,
+spiffs,   data, spiffs,  0x3D0000,0x20000,
+usercfg,  data, 0x40,    0x3F0000,0x10000,

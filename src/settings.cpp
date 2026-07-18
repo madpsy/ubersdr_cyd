@@ -3,6 +3,9 @@
 #include <ArduinoJson.h>
 #include <LittleFS.h>
 #include <Preferences.h>
+#include <esp_partition.h>
+
+#include <memory>
 
 #include "app_config.h"
 
@@ -111,6 +114,64 @@ bool loadUberSDRJson(String& host, uint16_t& port, String& pass) {
   return true;
 }
 
+// ── Web-flasher config import ─────────────────────────────────────────────────
+// The browser flasher (docs/flash/) writes WiFi + UberSDR settings into the
+// raw "usercfg" partition: 8-byte magic, uint32 LE JSON length, JSON bytes.
+// Import the values into NVS once, then erase the sector so the credentials
+// don't linger in flash and later portal/on-screen edits stick.
+
+constexpr char   kUserCfgMagic[8]  = {'U', 'B', 'S', 'D', 'R', 'C', 'F', '1'};
+constexpr size_t kUserCfgMaxJson   = 3072;
+
+void importFlasherConfig() {
+  const esp_partition_t* part = esp_partition_find_first(
+      ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, "usercfg");
+  if (part == nullptr) return;
+
+  struct __attribute__((packed)) {
+    char     magic[8];
+    uint32_t length;
+  } header;
+  if (esp_partition_read(part, 0, &header, sizeof(header)) != ESP_OK) return;
+  if (memcmp(header.magic, kUserCfgMagic, sizeof(kUserCfgMagic)) != 0) return;
+
+  if (header.length > 0 && header.length <= kUserCfgMaxJson) {
+    std::unique_ptr<char[]> buf(new char[header.length + 1]);
+    if (esp_partition_read(part, sizeof(header), buf.get(), header.length) ==
+        ESP_OK) {
+      buf[header.length] = '\0';
+
+      JsonDocument doc;
+      if (deserializeJson(doc, buf.get()) == DeserializationError::Ok) {
+        const String ssid  = doc["wifi_ssid"] | "";
+        const String wpass = doc["wifi_password"] | "";
+        if (!isPlaceholder(ssid)) {
+          preferences.putString("ssid", limitedString(ssid, 64));
+          preferences.putString("pass", limitedString(wpass, 64));
+          Serial.printf("usercfg: imported WiFi SSID \"%s\"\n", ssid.c_str());
+        }
+
+        const String   host  = doc["ubersdr_host"] | "";
+        const uint16_t port  = doc["ubersdr_port"] | 8080;
+        const String   upass = doc["ubersdr_password"] | "";
+        if (!isPlaceholder(host)) {
+          preferences.putString("ushost", limitedString(host, 64));
+          preferences.putUShort("usport", port == 0 ? 8080 : port);
+          preferences.putString("uspass", limitedString(upass, 64));
+          Serial.printf("usercfg: imported UberSDR host \"%s:%u\"\n",
+                        host.c_str(), port);
+        }
+      } else {
+        Serial.println("usercfg: JSON parse error, discarding");
+      }
+    }
+  }
+
+  // Consume the blob whether or not it parsed, so we never re-import.
+  esp_partition_erase_range(part, 0, SPI_FLASH_SEC_SIZE);
+  Serial.println("usercfg: partition consumed and erased");
+}
+
 }  // namespace
 
 void settingsBegin() {
@@ -120,6 +181,9 @@ void settingsBegin() {
   }
 
   preferences.begin(kNamespace, false);
+
+  // Import any config baked in by the browser flasher (one-shot, into NVS).
+  importFlasherConfig();
 
   // ── Wi-Fi credentials ──
   // Priority 1: /wifi.json on LittleFS (user-editable, gitignored)

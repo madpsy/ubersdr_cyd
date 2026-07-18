@@ -4,7 +4,21 @@ ESP32-2432S028R ("Cheap Yellow Display") firmware — the display front-end for 
 
 ## Getting started
 
-### 1. Clone and configure
+### Option 1 — Flash from your browser (easiest)
+
+**👉 [Open Web Flasher](https://madpsy.github.io/ubersdr_cyd/flash/)**
+
+No toolchain, no drivers, no cloning — flash straight from Chrome or Edge over USB using ESP Web Tools:
+
+1. Plug the CYD into your computer with a USB data cable.
+2. Open the web flasher and (optionally) enter your **WiFi credentials** and **UberSDR server details** in the form — they are baked into the flash image locally in your browser, so the display boots straight onto your network showing your instance. Nothing is sent anywhere.
+3. Click **Install** and pick the serial port.
+
+If you leave the form blank the device starts the `UberSDR-Setup` hotspot and you configure it on-screen or via browser as described below. Under the hood the baked-in settings are written to a dedicated `usercfg` flash partition which the firmware imports into NVS on first boot and then erases.
+
+### Option 2 — Build from source
+
+#### 1. Clone and configure
 
 ```bash
 git clone https://github.com/yourname/ubersdr_cyd
@@ -39,7 +53,7 @@ At boot the device resolves each setting in priority order:
 
 The admin password is sent only as the `X-Admin-Password` header to the configured host and is never committed to version control.
 
-### 2. Build and flash
+#### 2. Build and flash
 
 ```bash
 ./deploy.sh
@@ -55,7 +69,15 @@ This builds the firmware, uploads it, and uploads the LittleFS filesystem (`data
 
 The upload port comes from `platformio.ini`; override it with `UPLOAD_PORT=/dev/ttyUSB1 ./deploy.sh`. Watch the serial output with `pio device monitor`.
 
-### 3. Configure WiFi on-screen (if not using wifi.json)
+#### Updating the web-flasher binaries (maintainers)
+
+```bash
+./build.sh
+```
+
+Builds the firmware plus a **clean** LittleFS image (containing only the `.example` config files, never your local credentials) and stages `bootloader.bin` / `partitions.bin` / `boot_app0.bin` / `firmware.bin` / `littlefs.bin` into `docs/flash/`. Commit those and GitHub Pages (serving the `docs/` folder) publishes the updated web flasher.
+
+### Configure WiFi on-screen (if not baked in at flash time)
 
 1. Power on the device.
 2. Tap the lower half of the status screen ("Tap here to configure WiFi").
@@ -63,7 +85,7 @@ The upload port comes from `platformio.ini`; override it with `UPLOAD_PORT=/dev/
 4. Enter your password, then tap **OK**.
 5. The device connects and returns to the status screen.
 
-### 4. Configure WiFi via browser (alternative)
+### Configure WiFi via browser (alternative)
 
 1. Connect your phone/laptop to the `UberSDR-Setup` WiFi network (password `ubersdr1`).
 2. Open `http://192.168.4.1/` in a browser.
@@ -160,7 +182,11 @@ ubersdr_cyd/
 ├── data/                     # LittleFS filesystem image (uploaded to the device)
 │   ├── wifi.json.example     # Template — copy to wifi.json (gitignored)
 │   └── ubersdr.json.example  # Template — copy to ubersdr.json (gitignored)
-├── deploy.sh                 # Build + upload firmware and filesystem
+├── deploy.sh                 # Build + upload firmware and filesystem over USB
+├── build.sh                  # Build + stage web-flasher binaries into docs/flash/
+├── docs/
+│   └── flash/                # Browser-based flasher (GitHub Pages + ESP Web Tools)
+├── partitions.csv            # Flash layout (incl. usercfg partition for the web flasher)
 ├── include/
 │   ├── User_Setup.h          # TFT_eSPI pin/driver config for CYD
 │   ├── app_config.example.h  # Template — copy to app_config.h

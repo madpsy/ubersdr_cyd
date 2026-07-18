@@ -1,0 +1,472 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>UberSDR CYD — Web Flasher</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Flash the UberSDR CYD display firmware directly from your browser — no drivers or software required. Optionally bake in your WiFi and UberSDR server settings." />
+    <meta name="color-scheme" content="dark" />
+    <style>
+      *, *::before, *::after { box-sizing: border-box; }
+
+      body {
+        margin: 0;
+        padding: 0;
+        background: #1a1a1a;
+        color: #e0e0e0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Ubuntu, sans-serif;
+        line-height: 1.6;
+      }
+
+      header {
+        background: #111;
+        border-bottom: 1px solid #333;
+        padding: 16px 24px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+      header h1 {
+        margin: 0;
+        font-size: 1.25rem;
+        font-weight: 600;
+        color: #fff;
+        letter-spacing: 0.02em;
+      }
+      header .subtitle {
+        font-size: 0.85rem;
+        color: #888;
+        margin-left: auto;
+      }
+
+      .content {
+        max-width: 680px;
+        margin: 0 auto;
+        padding: 32px 24px 64px;
+      }
+
+      h2 {
+        font-size: 1rem;
+        font-weight: 600;
+        color: #ccc;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        margin: 2rem 0 0.75rem;
+        border-bottom: 1px solid #2a2a2a;
+        padding-bottom: 6px;
+      }
+
+      p { margin: 0.5rem 0 1rem; color: #bbb; }
+
+      .flash-card {
+        background: #222;
+        border: 1px solid #333;
+        border-radius: 8px;
+        padding: 28px 24px;
+        margin: 24px 0;
+        text-align: center;
+      }
+      .flash-card .device-name {
+        font-size: 1.1rem;
+        font-weight: 600;
+        color: #fff;
+        margin-bottom: 6px;
+      }
+      .flash-card .device-desc {
+        font-size: 0.875rem;
+        color: #888;
+        margin-bottom: 24px;
+      }
+
+      .cfg-card {
+        background: #222;
+        border: 1px solid #333;
+        border-radius: 8px;
+        padding: 22px 24px;
+        margin: 24px 0;
+        text-align: left;
+      }
+      .cfg-card .cfg-title {
+        font-size: 1rem;
+        font-weight: 600;
+        color: #fff;
+        margin-bottom: 2px;
+      }
+      .cfg-card .cfg-sub {
+        font-size: 0.85rem;
+        color: #888;
+        margin-bottom: 18px;
+      }
+      .cfg-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 14px 16px;
+      }
+      @media (max-width: 560px) { .cfg-grid { grid-template-columns: 1fr; } }
+      .field { display: flex; flex-direction: column; gap: 4px; }
+      .field label {
+        font-size: 0.78rem;
+        font-weight: 600;
+        color: #999;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+      .field input {
+        background: #1a1a1a;
+        border: 1px solid #3a3a3a;
+        border-radius: 5px;
+        padding: 8px 10px;
+        color: #e0e0e0;
+        font-size: 0.95rem;
+        font-family: inherit;
+        outline: none;
+      }
+      .field input:focus { border-color: #e6a817; }
+      .field input::placeholder { color: #555; }
+      .cfg-foot {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        margin-top: 16px;
+        flex-wrap: wrap;
+      }
+      .cfg-foot label.show-pw {
+        font-size: 0.82rem;
+        color: #888;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        cursor: pointer;
+        user-select: none;
+      }
+      #cfgStatus { font-size: 0.82rem; margin-left: auto; }
+      #cfgStatus.baked { color: #8ac48a; }
+      #cfgStatus.empty { color: #888; }
+
+      esp-web-install-button {
+        --esp-tools-button-color: #e6a817;
+        --esp-tools-button-text-color: #111;
+        --esp-tools-button-border-radius: 6px;
+      }
+
+      .unsupported-msg {
+        background: #2a1a1a;
+        border: 1px solid #5a2a2a;
+        border-radius: 6px;
+        padding: 14px 18px;
+        color: #e07070;
+        font-size: 0.9rem;
+        text-align: left;
+      }
+
+      .steps {
+        counter-reset: step;
+        list-style: none;
+        padding: 0;
+        margin: 0;
+      }
+      .steps li {
+        counter-increment: step;
+        display: flex;
+        gap: 14px;
+        align-items: flex-start;
+        padding: 10px 0;
+        border-bottom: 1px solid #2a2a2a;
+        color: #bbb;
+        font-size: 0.9rem;
+      }
+      .steps li:last-child { border-bottom: none; }
+      .steps li::before {
+        content: counter(step);
+        flex-shrink: 0;
+        width: 24px;
+        height: 24px;
+        background: #333;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 0.75rem;
+        font-weight: 700;
+        color: #e6a817;
+        margin-top: 1px;
+      }
+
+      .note {
+        background: #1e2a1e;
+        border-left: 3px solid #4a8a4a;
+        border-radius: 0 4px 4px 0;
+        padding: 10px 14px;
+        font-size: 0.875rem;
+        color: #9aba9a;
+        margin: 12px 0;
+      }
+      .warn {
+        background: #2a2010;
+        border-left: 3px solid #a07020;
+        border-radius: 0 4px 4px 0;
+        padding: 10px 14px;
+        font-size: 0.875rem;
+        color: #c8a060;
+        margin: 12px 0;
+      }
+
+      code {
+        background: #2a2a2a;
+        border: 1px solid #3a3a3a;
+        border-radius: 3px;
+        padding: 1px 5px;
+        font-size: 0.85em;
+        color: #e0c080;
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      }
+
+      a { color: #e6a817; text-decoration: none; }
+      a:hover { text-decoration: underline; }
+
+      .links {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 8px;
+      }
+      .links a {
+        background: #2a2a2a;
+        border: 1px solid #3a3a3a;
+        border-radius: 5px;
+        padding: 6px 14px;
+        font-size: 0.85rem;
+        color: #ccc;
+        transition: border-color 0.15s, color 0.15s;
+      }
+      .links a:hover {
+        border-color: #e6a817;
+        color: #e6a817;
+        text-decoration: none;
+      }
+
+      footer {
+        margin-top: 48px;
+        border-top: 1px solid #2a2a2a;
+        padding-top: 20px;
+        font-size: 0.8rem;
+        color: #555;
+        text-align: center;
+      }
+      footer a { color: #666; }
+    </style>
+  </head>
+  <body>
+
+    <header>
+      <h1>📺 UberSDR CYD Web Flasher</h1>
+      <span class="subtitle">ESP32-2432S028R display</span>
+    </header>
+
+    <div class="content">
+
+      <p>
+        Flash the UberSDR CYD display firmware directly from your browser using
+        <a href="https://esphome.github.io/esp-web-tools/" target="_blank" rel="noopener">ESP Web Tools</a>.
+        No drivers, no Python, no PlatformIO required — just Chrome or Edge and a USB cable.
+      </p>
+
+      <h2>1 · Your settings (optional)</h2>
+
+      <div class="cfg-card">
+        <div class="cfg-title">WiFi &amp; UberSDR server</div>
+        <div class="cfg-sub">
+          Fill these in and they are baked into the flash image — the display boots
+          straight onto your network and starts showing your UberSDR instance.
+          Leave blank to configure later on-screen or via the setup hotspot.
+        </div>
+        <div class="cfg-grid">
+          <div class="field">
+            <label for="cfgSsid">WiFi SSID</label>
+            <input id="cfgSsid" type="text" maxlength="64" placeholder="MyHomeWiFi" autocomplete="off" />
+          </div>
+          <div class="field">
+            <label for="cfgWifiPass">WiFi password</label>
+            <input id="cfgWifiPass" type="password" maxlength="64" placeholder="••••••••" autocomplete="new-password" />
+          </div>
+          <div class="field">
+            <label for="cfgHost">UberSDR host / IP</label>
+            <input id="cfgHost" type="text" maxlength="64" placeholder="ubersdr.example.com" autocomplete="off" />
+          </div>
+          <div class="field">
+            <label for="cfgPort">UberSDR port</label>
+            <input id="cfgPort" type="number" min="1" max="65535" value="8080" />
+          </div>
+          <div class="field">
+            <label for="cfgAdminPass">UberSDR admin password</label>
+            <input id="cfgAdminPass" type="password" maxlength="64" placeholder="optional — unlocks admin slides" autocomplete="new-password" />
+          </div>
+        </div>
+        <div class="cfg-foot">
+          <label class="show-pw"><input type="checkbox" id="cfgShowPw" /> Show passwords</label>
+          <span id="cfgStatus" class="empty"></span>
+        </div>
+      </div>
+
+      <div class="note">
+        🔒 Your settings never leave this computer — they are written into the image
+        locally and flashed over USB. The device erases the settings blob from flash
+        after importing it on first boot.
+      </div>
+
+      <h2>2 · Flash</h2>
+
+      <div class="flash-card">
+        <div class="device-name">UberSDR CYD Display</div>
+        <div class="device-desc">ESP32-2432S028R "Cheap Yellow Display" · flashes firmware + filesystem + your settings</div>
+
+        <esp-web-install-button manifest="manifest.json">
+          <span slot="unsupported">
+            <div class="unsupported-msg">
+              ⚠️ <strong>Web Serial is not available in this browser.</strong><br />
+              Please open this page in <strong>Google Chrome</strong> or <strong>Microsoft Edge</strong>
+              (desktop, version 89+). Firefox and Safari do not support Web Serial.
+            </div>
+          </span>
+          <span slot="not-allowed">
+            <div class="unsupported-msg">
+              ⚠️ <strong>Web Serial requires a secure context (HTTPS).</strong><br />
+              This page must be served over <code>https://</code> — opening the file directly
+              from disk (<code>file://</code>) will not work.
+            </div>
+          </span>
+        </esp-web-install-button>
+      </div>
+
+      <ol class="steps">
+        <li>Plug the CYD into this computer with a USB data cable (micro-USB port on the board).</li>
+        <li>Fill in your settings above (or leave blank).</li>
+        <li>Click <strong>Install</strong>, pick the serial port that appears, and follow the prompts.</li>
+        <li>When asked, choosing <strong>Erase device</strong> is recommended for a first install.</li>
+      </ol>
+
+      <div class="warn">
+        ⚠️ If no serial port appears, your cable may be charge-only, or Windows may need the
+        <a href="https://www.wch-ic.com/downloads/CH341SER_ZIP.html" target="_blank" rel="noopener">CH340 driver</a>
+        (the CYD's USB-serial chip). Linux and macOS need no driver.
+      </div>
+
+      <h2>After flashing</h2>
+
+      <ol class="steps">
+        <li>The device reboots. With settings baked in, it joins your WiFi and starts the overview slideshow — done.</li>
+        <li>Without baked-in WiFi, connect to the <strong>UberSDR-Setup</strong> hotspot (password <code>ubersdr1</code>) and browse to <code>http://192.168.4.1/</code>, or just tap the screen to use the on-screen keyboard.</li>
+        <li>Anything can be changed later at <code>http://ubersdr-cyd.local/</code> — WiFi, server details, brightness.</li>
+      </ol>
+
+      <h2>Links</h2>
+
+      <div class="links">
+        <a href="https://github.com/madpsy/ubersdr_cyd" target="_blank" rel="noopener">GitHub repo</a>
+        <a href="https://github.com/madpsy/ubersdr_cyd/blob/main/README.md" target="_blank" rel="noopener">README</a>
+        <a href="https://github.com/madpsy/ubersdr_cyd/blob/main/README.md#configuring-notifications-in-ubersdr" target="_blank" rel="noopener">Notifications setup</a>
+      </div>
+
+      <footer>
+        Powered by <a href="https://esphome.github.io/esp-web-tools/" target="_blank" rel="noopener">ESP Web Tools</a>
+        (Apache 2.0, by ESPHome / Nabu Casa) ·
+        <a href="https://github.com/madpsy/ubersdr_cyd" target="_blank" rel="noopener">UberSDR CYD on GitHub</a>
+      </footer>
+
+    </div>
+
+    <script type="module" src="install-button.js"></script>
+    <script>
+      // Build the ESP Web Tools manifest dynamically so the user's WiFi +
+      // UberSDR settings can be appended as an extra flash part. The settings
+      // are packed as: 8-byte magic "UBSDRCF1", uint32 LE JSON length, JSON —
+      // written to the "usercfg" partition at 0x3F0000 (see partitions.csv).
+      // The firmware imports the values into NVS on first boot, then erases
+      // the sector.
+      (function () {
+        var USERCFG_OFFSET = 0x3F0000;
+        var MAGIC = [0x55, 0x42, 0x53, 0x44, 0x52, 0x43, 0x46, 0x31]; // "UBSDRCF1"
+        var STATIC_PARTS = [
+          ['bootloader.bin', 0x1000],
+          ['partitions.bin', 0x8000],
+          ['boot_app0.bin', 0xe000],
+          ['firmware.bin', 0x10000],
+          ['littlefs.bin', 0x3D0000],
+        ];
+
+        var button = document.querySelector('esp-web-install-button');
+        var status = document.getElementById('cfgStatus');
+        var cfgUrl = null;
+        var manUrl = null;
+
+        function val(id) { return document.getElementById(id).value.trim(); }
+
+        function rebuild() {
+          var parts = STATIC_PARTS.map(function (p) {
+            return { path: new URL(p[0], location.href).href, offset: p[1] };
+          });
+
+          var cfg = {};
+          var ssid = val('cfgSsid');
+          var host = val('cfgHost');
+          if (ssid) {
+            cfg.wifi_ssid = ssid;
+            cfg.wifi_password = document.getElementById('cfgWifiPass').value;
+          }
+          if (host) {
+            cfg.ubersdr_host = host;
+            cfg.ubersdr_port = parseInt(val('cfgPort'), 10) || 8080;
+            cfg.ubersdr_password = document.getElementById('cfgAdminPass').value;
+          }
+
+          if (cfgUrl) { URL.revokeObjectURL(cfgUrl); cfgUrl = null; }
+          if (manUrl) { URL.revokeObjectURL(manUrl); manUrl = null; }
+
+          var baked = [];
+          if (cfg.wifi_ssid) baked.push('WiFi');
+          if (cfg.ubersdr_host) baked.push('UberSDR server');
+          if (baked.length) {
+            var json = new TextEncoder().encode(JSON.stringify(cfg));
+            var blob = new Uint8Array(12 + json.length);
+            blob.set(MAGIC, 0);
+            new DataView(blob.buffer).setUint32(8, json.length, true);
+            blob.set(json, 12);
+            cfgUrl = URL.createObjectURL(
+              new Blob([blob], { type: 'application/octet-stream' }));
+            parts.push({ path: cfgUrl, offset: USERCFG_OFFSET });
+            status.textContent = '✔ ' + baked.join(' + ') + ' will be baked in';
+            status.className = 'baked';
+          } else {
+            status.textContent = 'No settings — device starts the setup hotspot';
+            status.className = 'empty';
+          }
+
+          var manifest = {
+            name: 'UberSDR CYD',
+            version: '1.0.0',
+            new_install_prompt_erase: true,
+            new_install_improv_wait_time: 0,
+            builds: [{ chipFamily: 'ESP32', parts: parts }],
+          };
+          manUrl = URL.createObjectURL(
+            new Blob([JSON.stringify(manifest)], { type: 'application/json' }));
+          button.manifest = manUrl;
+        }
+
+        ['cfgSsid', 'cfgWifiPass', 'cfgHost', 'cfgPort', 'cfgAdminPass']
+          .forEach(function (id) {
+            document.getElementById(id).addEventListener('input', rebuild);
+          });
+
+        document.getElementById('cfgShowPw').addEventListener('change', function (e) {
+          var type = e.target.checked ? 'text' : 'password';
+          document.getElementById('cfgWifiPass').type = type;
+          document.getElementById('cfgAdminPass').type = type;
+        });
+
+        rebuild();
+      })();
+    </script>
+
+  </body>
+</html>
