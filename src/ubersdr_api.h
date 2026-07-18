@@ -1,0 +1,154 @@
+#pragma once
+
+#include <Arduino.h>
+
+// ── UberSDR API client ────────────────────────────────────────────────────────
+//
+// Polls the UberSDR Go server's HTTP endpoints on a timer and exposes the
+// results via a shared snapshot struct.  All network I/O happens in
+// ubersdrApiLoop() which must be called every loop() iteration.
+//
+// Endpoints polled (see include/app_config.h for host/port/password):
+//   GET /admin/system-load          (X-Admin-Password) — load averages + CPU temp
+//   GET /admin/sessions             (X-Admin-Password) — active user counts
+//   GET /api/noisefloor/latest      (public)           — per-band FT8 SNR
+//   GET /api/spaceweather           (public)           — K/A index, solar flux
+//
+// Call order:
+//   ubersdrApiBegin()  — once, in setup()
+//   ubersdrApiLoop()   — every loop() iteration (drives the poll timer)
+
+// Maximum number of amateur bands tracked for the band-conditions slide.
+constexpr int kMaxBands = 12;
+
+// Number of downsampled points stored per band for the spectrum slide.  Each
+// mini-chart is ~150 px wide; 128 points gives good detail at tiny RAM cost.
+constexpr int kSpectrumPoints = 128;
+
+struct BandCondition {
+  String band;      // e.g. "20m"
+  float  snr;       // FT8 SNR in dB
+  String quality;   // "EXCELLENT" / "GOOD" / "FAIR" / "POOR"
+};
+
+// A single band's downsampled spectrum, normalised to 0..255 for compact
+// storage (0 = dbMin, 255 = dbMax).  Rendered as a filled area plot.
+struct BandSpectrum {
+  String  band;                     // e.g. "20m"
+  bool    valid;                    // true once FFT data has been captured
+  uint8_t pts[kSpectrumPoints];     // normalised magnitude, 0..255
+  float   dbMin;                    // dB value mapped to 0
+  float   dbMax;                    // dB value mapped to 255
+  float   startFreqMhz;             // band start frequency in MHz
+  float   endFreqMhz;               // band end frequency in MHz
+  float   ft8FreqMhz;               // FT8 centre frequency in MHz (0 = none)
+  float   ft8BwMhz;                 // FT8 bandwidth in MHz (typically 0.003)
+};
+
+// Aggregated snapshot of all polled UberSDR metrics.
+// Each section carries its own validity flag so a slide can render "no data"
+// independently when one endpoint fails while others succeed.
+struct UberSDRSnapshot {
+  // ── Users (/admin/sessions?compact=1; userCount/maxSessions also derived
+  //    from /api/description max_clients − available_clients) ──
+  bool usersValid;
+  int  userCount;      // unique non-bypassed active users
+  int  bypassCount;    // unique bypassed users
+  int  maxSessions;    // configured capacity
+
+  // ── Network stats (/admin/sessions?compact=1 only; netValid false when the
+  //    server predates the compact parameter) ──
+  bool netValid;
+  int  externalSessions;   // non-internal session count
+  int  audioKbps;          // summed instantaneous audio throughput
+  int  waterfallKbps;      // summed instantaneous waterfall throughput
+  int  totalKbps;          // audio + waterfall
+
+  // ── Instance identity / timezone (/api/description → receiver.*) ──
+  String callsign;           // receiver.callsign (shown in the header)
+  String cwSkimmerCallsign;  // cw_skimmer_callsign (for RBN rank lookup)
+  bool tzValid;
+  int  tzOffsetMinutes;   // DST-adjusted offset from UTC, in minutes
+
+  // ── Antenna switch + rotator (/api/description) ──
+  bool   antSwitchEnabled;    // ant_switch present + enabled
+  bool   antSwitchGrounded;   // ant_switch.grounded
+  String antSwitchLabels;     // comma-joined ant_switch.active_labels
+
+  bool   rotatorEnabled;      // rotator.enabled
+  bool   rotatorConnected;    // rotator.connected
+  int    rotatorAzimuth;      // rotator.azimuth in whole degrees (-1 = unknown)
+
+  // ── System load (/admin/system-load) ──
+  bool   loadValid;
+  float  load1, load5, load15;
+  int    cpuCores;
+  bool   cpuTempAvailable;
+  float  cpuTempC;
+  float  cpuTempThresholdC;
+  String cpuTempStatus;   // "ok" / "warning" / "critical"
+
+  // ── Band conditions (/api/noisefloor/latest) ──
+  bool          bandsValid;
+  BandCondition bands[kMaxBands];
+  int           bandCount;
+
+  // ── Per-band spectrum (/api/noisefloor/fft?band=…) ──
+  bool          spectrumValid;             // at least one band captured
+  BandSpectrum  spectrum[kMaxBands];       // parallel to bands[] order
+  int           spectrumCount;
+
+  // ── Rankings (/admin/psk-rank, /admin/wspr-rank, /admin/rbn-data) ──
+  bool pskValid;
+  int  pskSpotsRank;    // PSKReporter spots "All" rank (0 = not available)
+  int  pskSpotsDay;     // spots today
+  int  pskDxccRank;     // PSKReporter countries "All" rank (0 = not available)
+  int  pskDxccDay;      // countries today
+  bool wsprValid;
+  int  wsprRank24h;     // WSPR Live rolling-24h rank (0 = not available)
+  int  wsprUnique24h;   // unique spots in 24h
+  int  wsprRankToday;   // WSPR Live today rank (0 = not available)
+  int  wsprUniqueToday; // unique spots today
+  int  wsprRankYest;    // WSPR Live yesterday rank (0 = not available)
+  int  wsprUniqueYest;  // unique spots yesterday
+  bool rbnValid;
+  int  rbnRank;         // RBN skimmer rank (0 = not available)
+  int  rbnTotal;        // total skimmers in RBN dataset
+  int  rbnSpots;        // spot count for today
+
+  // ── Space weather (/api/spaceweather) ──
+  bool   spaceValid;
+  int    kIndex;
+  int    aIndex;
+  float  solarFlux;
+  String propQuality;   // "Excellent" / "Good" / "Fair" / "Poor"
+
+  // ── Terrestrial weather (/api/weather — OpenWeatherMap shape) ──
+  bool   weatherValid;
+  String wxDescription; // e.g. "light rain" (title-cased for display)
+  String wxLocation;    // OWM "name"
+  String wxMain;        // e.g. "Rain" / "Clear" — used for colour
+  float  wxTempC;
+  int    wxHumidity;    // %
+  int    wxPressure;    // hPa
+  int    wxWindKmh;     // rounded km/h
+  String wxWindDir;     // compass, e.g. "NW" (empty when no bearing)
+  int    wxGustKmh;     // rounded km/h (0 when absent)
+
+  // ── Meta ──
+  uint32_t lastSuccessMs;   // millis() of the most recent successful fetch (any)
+};
+
+// Initialise the API client (records config, resets snapshot).
+void ubersdrApiBegin();
+
+// Must be called every loop() iteration.  Fires one HTTP request per poll
+// cycle (round-robins across endpoints to keep each request short).
+// Safe to call before WiFi connects — it simply does nothing until connected.
+void ubersdrApiLoop();
+
+// Returns a const reference to the latest aggregated snapshot.
+const UberSDRSnapshot& getUberSDRSnapshot();
+
+// Force an immediate re-poll on the next loop (e.g. after WiFi reconnects).
+void ubersdrApiRefresh();

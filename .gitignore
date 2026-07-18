@@ -1,0 +1,5 @@
+.pio/
+.vscode/
+include/app_config.h
+data/wifi.json
+data/ubersdr.json

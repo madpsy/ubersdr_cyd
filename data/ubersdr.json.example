@@ -1,0 +1,5 @@
+{
+  "host": "ubersdr.local",
+  "port": 8080,
+  "password": "your-admin-password"
+}
