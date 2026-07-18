@@ -10,8 +10,9 @@ void drawCompass(TFT_eSPI& tft, int16_t cx, int16_t cy, int16_t r, int az) {
   tft.drawCircle(cx, cy, r, kColCardHi);
   tft.drawCircle(cx, cy, r - 1, kColPanel);
 
-  // Cardinal ticks + labels.
-  const char* card[4] = {"N", "E", "S", "W"};
+  // Cardinal ticks + labels (N omitted — needle indicates north; label would
+  // overlap the card title above the dial).
+  const char* card[4] = {nullptr, "E", "S", "W"};
   for (int i = 0; i < 4; ++i) {
     const float a = i * 90.0f * (float)M_PI / 180.0f;
     const int16_t x0 = cx + static_cast<int16_t>(sinf(a) * (r - 2));
@@ -19,9 +20,11 @@ void drawCompass(TFT_eSPI& tft, int16_t cx, int16_t cy, int16_t r, int az) {
     const int16_t x1 = cx + static_cast<int16_t>(sinf(a) * (r - 8));
     const int16_t y1 = cy - static_cast<int16_t>(cosf(a) * (r - 8));
     tft.drawLine(x0, y0, x1, y1, kColMuted);
-    const int16_t lx = cx + static_cast<int16_t>(sinf(a) * (r + 8));
-    const int16_t ly = cy - static_cast<int16_t>(cosf(a) * (r + 8));
-    drawText(tft, card[i], lx, ly, 2, (i == 0) ? kColAccent : kColMuted, MC_DATUM);
+    if (card[i]) {
+      const int16_t lx = cx + static_cast<int16_t>(sinf(a) * (r + 8));
+      const int16_t ly = cy - static_cast<int16_t>(cosf(a) * (r + 8));
+      drawText(tft, card[i], lx, ly, 2, kColMuted, MC_DATUM);
+    }
   }
 
   // Needle.
