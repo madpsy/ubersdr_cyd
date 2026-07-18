@@ -1139,6 +1139,13 @@ UberSDRSnapshot getUberSDRSnapshot() {
   return copy;
 }
 
+void ubersdrApiGetHealth(bool& healthValid, uint8_t& healthOverall) {
+  xSemaphoreTake(g_snapMutex, portMAX_DELAY);
+  healthValid   = g_snap.healthValid;
+  healthOverall = g_snap.healthOverall;
+  xSemaphoreGive(g_snapMutex);
+}
+
 void ubersdrApiRefresh() {
   g_step        = 0;
   g_forceRefresh = true;

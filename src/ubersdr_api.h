@@ -195,7 +195,14 @@ void ubersdrApiBegin();
 void ubersdrApiTaskBegin();
 
 // Returns a thread-safe copy of the latest aggregated snapshot.
+// NOTE: UberSDRSnapshot is large (several KB); avoid placing it on the Arduino
+// loopTask stack.  Prefer ubersdrApiGetHealth() for LED/status use cases.
 UberSDRSnapshot getUberSDRSnapshot();
+
+// Lightweight accessor — reads only the two health fields under the mutex.
+// Use this instead of getUberSDRSnapshot() when you only need health status,
+// to avoid a large stack allocation in the loopTask.
+void ubersdrApiGetHealth(bool& healthValid, uint8_t& healthOverall);
 
 // Force an immediate re-poll on the next task iteration (e.g. after WiFi reconnects).
 void ubersdrApiRefresh();
