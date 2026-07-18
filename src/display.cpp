@@ -186,8 +186,8 @@ void runCalibration() {
   delay(3000);
 
   // 3 calibration points (non-collinear): TL, TR, BL
-  const int16_t scrX[3] = {kM,     W - kM, kM    };
-  const int16_t scrY[3] = {kM,     kM,     H - kM};
+  const int16_t scrX[3] = {kM,                        static_cast<int16_t>(W - kM), kM                       };
+  const int16_t scrY[3] = {kM,                        kM,                           static_cast<int16_t>(H - kM)};
   const char*   names[3]= {"TOP-LEFT", "TOP-RIGHT", "BOTTOM-LEFT"};
 
   int32_t tx[3], ty[3];

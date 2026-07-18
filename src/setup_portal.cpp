@@ -192,6 +192,9 @@ String pageHtml(const String& message = "") {
             "<input id='usport' name='usport' type='number' min='1' max='65535' value='");
   html += String(settings.ubersdrPort);
   html += F("'>");
+  html += F("<label><input name='ustls' type='checkbox' value='1'");
+  html += checked(settings.ubersdrTls);
+  html += F(">Use HTTPS (TLS, no certificate validation)</label>");
   html += F("<label for='uspass'>Admin password</label>"
             "<input id='uspass' name='uspass' type='password' maxlength='64' "
             "autocomplete='new-password' placeholder='Leave blank to keep saved password'>");
@@ -254,6 +257,7 @@ void handleSave() {
   if (submittedPort >= 1 && submittedPort <= 65535) {
     settings.ubersdrPort = static_cast<uint16_t>(submittedPort);
   }
+  settings.ubersdrTls = server.hasArg("ustls");
   const String submittedUsPass = limitedArg("uspass", 64, false);
   if (server.hasArg("clearuspass")) {
     settings.ubersdrPassword = "";

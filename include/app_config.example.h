@@ -31,3 +31,8 @@
 
 // Admin password — must match config.yaml admin.password on the server.
 #define UBERSDR_PASSWORD "your-admin-password"
+
+// Set to true to connect via HTTPS (TLS without certificate validation).
+// Useful when the server is behind a reverse proxy with a self-signed cert.
+// Leave false for plain HTTP on a local LAN (the typical deployment).
+#define UBERSDR_TLS false

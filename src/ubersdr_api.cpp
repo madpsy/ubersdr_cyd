@@ -10,6 +10,7 @@
 #include <ArduinoJson.h>
 #include <WiFi.h>
 #include <WiFiClient.h>
+#include <WiFiClientSecure.h>
 
 #include "debug_log.h"
 #include "settings.h"
@@ -57,8 +58,24 @@ int httpGet(const char* path, bool withAuth, String& out) {
     return -1;
   }
 
-  WiFiClient client;
-  client.setTimeout(kHttpTimeoutMs / 1000);
+  // Use WiFiClientSecure (no cert validation) when TLS is enabled, otherwise
+  // plain WiFiClient.  Both share the same Client interface so the rest of
+  // the function is identical.
+  WiFiClientSecure tlsClient;
+  WiFiClient       plainClient;
+  Client*          clientPtr;
+  if (cfg.ubersdrTls) {
+    tlsClient.setInsecure();
+    clientPtr = &tlsClient;
+  } else {
+    clientPtr = &plainClient;
+  }
+  Client& client = *clientPtr;
+  if (cfg.ubersdrTls) {
+    tlsClient.setTimeout(kHttpTimeoutMs / 1000);
+  } else {
+    plainClient.setTimeout(kHttpTimeoutMs / 1000);
+  }
 
   if (!client.connect(cfg.ubersdrHost.c_str(), cfg.ubersdrPort)) {
     debugLogf("GET %s: connect FAILED %s:%u", path,
@@ -176,8 +193,21 @@ int httpGetJsonFiltered(const char* path, bool withAuth,
     return -1;
   }
 
-  WiFiClient client;
-  client.setTimeout(kHttpTimeoutMs / 1000);
+  WiFiClientSecure tlsClient;
+  WiFiClient       plainClient;
+  Client*          clientPtr;
+  if (cfg.ubersdrTls) {
+    tlsClient.setInsecure();
+    clientPtr = &tlsClient;
+  } else {
+    clientPtr = &plainClient;
+  }
+  Client& client = *clientPtr;
+  if (cfg.ubersdrTls) {
+    tlsClient.setTimeout(kHttpTimeoutMs / 1000);
+  } else {
+    plainClient.setTimeout(kHttpTimeoutMs / 1000);
+  }
 
   if (!client.connect(cfg.ubersdrHost.c_str(), cfg.ubersdrPort)) {
     debugLogf("GET %s: connect FAILED %s:%u", path,

@@ -301,6 +301,12 @@
             <label for="cfgAdminPass">UberSDR admin password</label>
             <input id="cfgAdminPass" type="password" maxlength="64" placeholder="optional — unlocks admin slides" autocomplete="new-password" />
           </div>
+          <div class="field" style="justify-content:flex-end">
+            <label style="text-transform:none;letter-spacing:normal;font-size:0.875rem;display:flex;align-items:center;gap:8px;cursor:pointer">
+              <input type="checkbox" id="cfgTls" />
+              Use HTTPS (TLS)
+            </label>
+          </div>
         </div>
         <div class="cfg-foot">
           <label class="show-pw"><input type="checkbox" id="cfgShowPw" /> Show passwords</label>
@@ -427,6 +433,7 @@
             cfg.ubersdr_host = host;
             cfg.ubersdr_port = parseInt(val('cfgPort'), 10) || 8080;
             cfg.ubersdr_password = document.getElementById('cfgAdminPass').value;
+            cfg.ubersdr_tls = document.getElementById('cfgTls').checked;
           }
 
           if (cfgUrl) { URL.revokeObjectURL(cfgUrl); cfgUrl = null; }
@@ -467,6 +474,7 @@
           .forEach(function (id) {
             document.getElementById(id).addEventListener('input', rebuild);
           });
+        document.getElementById('cfgTls').addEventListener('change', rebuild);
 
         document.getElementById('cfgShowPw').addEventListener('change', function (e) {
           var type = e.target.checked ? 'text' : 'password';

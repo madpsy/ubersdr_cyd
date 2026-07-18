@@ -12,6 +12,7 @@ struct AppSettings {
   String   ubersdrHost;      // IP or hostname (no scheme)
   uint16_t ubersdrPort;      // HTTP port
   String   ubersdrPassword;  // admin password → X-Admin-Password header
+  bool     ubersdrTls;       // true = connect via HTTPS (no cert validation)
 };
 
 void settingsBegin();

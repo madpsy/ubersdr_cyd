@@ -79,8 +79,8 @@ bool loadWifiJson(String& ssid, String& pass) {
 }
 
 // Try to read UberSDR server config from /ubersdr.json on LittleFS.
-// Returns true and populates host/port/pass if valid (non-placeholder host).
-bool loadUberSDRJson(String& host, uint16_t& port, String& pass) {
+// Returns true and populates host/port/pass/tls if valid (non-placeholder host).
+bool loadUberSDRJson(String& host, uint16_t& port, String& pass, bool& tls) {
   if (!LittleFS.exists(kUberSDRJsonPath)) {
     Serial.println("ubersdr.json: not found on LittleFS");
     return false;
@@ -104,13 +104,15 @@ bool loadUberSDRJson(String& host, uint16_t& port, String& pass) {
   host = doc["host"] | "";
   port = doc["port"] | 8080;
   pass = doc["password"] | "";
+  tls  = doc["tls"]  | false;
 
   if (isPlaceholder(host)) {
     Serial.println("ubersdr.json: placeholder host, ignoring");
     return false;
   }
 
-  Serial.printf("ubersdr.json: loaded host \"%s:%u\"\n", host.c_str(), port);
+  Serial.printf("ubersdr.json: loaded host \"%s:%u\" tls=%d\n",
+                host.c_str(), port, tls ? 1 : 0);
   return true;
 }
 
@@ -154,12 +156,14 @@ void importFlasherConfig() {
         const String   host  = doc["ubersdr_host"] | "";
         const uint16_t port  = doc["ubersdr_port"] | 8080;
         const String   upass = doc["ubersdr_password"] | "";
+        const bool     utls  = doc["ubersdr_tls"] | false;
         if (!isPlaceholder(host)) {
           preferences.putString("ushost", limitedString(host, 64));
           preferences.putUShort("usport", port == 0 ? 8080 : port);
           preferences.putString("uspass", limitedString(upass, 64));
-          Serial.printf("usercfg: imported UberSDR host \"%s:%u\"\n",
-                        host.c_str(), port);
+          preferences.putBool("ustls",   utls);
+          Serial.printf("usercfg: imported UberSDR host \"%s:%u\" tls=%d\n",
+                        host.c_str(), port, utls ? 1 : 0);
         }
       } else {
         Serial.println("usercfg: JSON parse error, discarding");
@@ -203,10 +207,12 @@ void settingsBegin() {
   // Priority 3: compile-time defaults from app_config.h
   String usHost, usPass;
   uint16_t usPort = 8080;
-  if (loadUberSDRJson(usHost, usPort, usPass)) {
+  bool usTls = false;
+  if (loadUberSDRJson(usHost, usPort, usPass, usTls)) {
     currentSettings.ubersdrHost     = usHost;
     currentSettings.ubersdrPort     = usPort;
     currentSettings.ubersdrPassword = usPass;
+    currentSettings.ubersdrTls      = usTls;
   } else {
     currentSettings.ubersdrHost =
         preferences.getString("ushost", String(UBERSDR_HOST));
@@ -215,6 +221,8 @@ void settingsBegin() {
     if (currentSettings.ubersdrPort == 0) currentSettings.ubersdrPort = 8080;
     currentSettings.ubersdrPassword =
         preferences.getString("uspass", String(UBERSDR_PASSWORD));
+    currentSettings.ubersdrTls =
+        preferences.getBool("ustls", static_cast<bool>(UBERSDR_TLS));
   }
 
   currentSettings.brightnessPercent =
@@ -247,6 +255,7 @@ void saveSettings(const AppSettings& settings) {
   preferences.putString("ushost",    currentSettings.ubersdrHost);
   preferences.putUShort("usport",    currentSettings.ubersdrPort);
   preferences.putString("uspass",    currentSettings.ubersdrPassword);
+  preferences.putBool("ustls",       currentSettings.ubersdrTls);
 }
 
 bool hasWifiCredentials() {
