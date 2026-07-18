@@ -134,6 +134,8 @@ curl "http://ubersdr-cyd.local/notify?msg=hello"
   - **Weather** — local terrestrial conditions (description, temperature, humidity, pressure, wind) from the instance's location.
   - **Antenna** — live antenna-switch state (active port label or GROUNDED) and a rotator compass dial with azimuth + 16-point bearing. Only shown when the server reports an enabled antenna switch or a connected rotator.
   - **Ranking** — PSKReporter spots/DXCC rank, WSPR Live rank (24h / today / yesterday) and RBN skimmer rank, laid out in 1–3 columns depending on which sources report data.
+  - **GPSDO** — GPS-disciplined oscillator status: PLL/GPS lock indicators, fix mode, satellites used, HDOP, altitude and UTC time from the GPS receiver. Only shown when the server reports a GPSDO.
+  - **Health** — per-component monitor-health grid (page 0: overall status banner + colour-coded dot grid; pages 1+: one detail page per unhealthy component listing its issue strings). Only shown when the server reports health data.
 
 The header shows the instance callsign, a live **user-count chip** (`1/20`, green normally, amber at capacity), the slide counter, and a clock with the **UberSDR instance's local time** (derived from `receiver.timezone_offset` in `/api/description`), falling back to UTC until that offset is known.
 - **Webhook notifications** — the display exposes `POST /notify` (port 80, LAN-only, no auth) for UberSDR's Generic-webhook notification channel. Incoming messages appear as a toast card overlaid on the bottom of the screen for ~6 s each (up to 6 queued, "+N" badge, tap to dismiss; slide auto-advance pauses while a toast is up). The toast title uses the JSON payload's `rule` name when present, then `event`, then `channel`. Accepts `webhook_format: text` or `json` (also Slack/Discord shapes), plus `?msg=…` on GET for testing:
@@ -141,6 +143,7 @@ The header shows the instance callsign, a live **user-count chip** (`1/20`, gree
   curl "http://ubersdr-cyd.local/notify?msg=hello"
   ```
   Server-side setup is described in [Configuring notifications in UberSDR](#configuring-notifications-in-ubersdr) above.
+- **Health status LED** — the onboard RGB LED reflects the UberSDR monitor-health overall status in real time: blue while waiting for data, green when all components are healthy, amber on warnings, red on critical alerts. See [Onboard RGB LED](#onboard-rgb-led--health-status-indicator) for the full colour table.
 - **On-screen WiFi setup** — tap the screen to open a touch keyboard and enter your SSID and password directly on the display. No phone or laptop needed.
 - **Setup hotspot** — the device also broadcasts `UberSDR-Setup` (password `ubersdr1`) so you can configure WiFi from a browser at `192.168.4.1` or `http://ubersdr-cyd.local/` once connected. (mDNS name is `ubersdr-cyd` to avoid clashing with the UberSDR server's own `ubersdr.local`.)
 - **Debug log** — a rolling 100-line log of API polls and results is served at `http://<display-ip>/debug` (or `http://ubersdr-cyd.local/debug`), auto-refreshing every 3 seconds.
@@ -220,6 +223,8 @@ The overview slideshow polls these endpoints round-robin, one every 2 s (~20 s f
 | `GET /admin/psk-rank` | `X-Admin-Password` | PSKReporter spots + DXCC rank |
 | `GET /admin/wspr-rank` | `X-Admin-Password` | WSPR Live rank |
 | `GET /admin/rbn-data` | `X-Admin-Password` | RBN skimmer rank |
+| `GET /admin/gpsdo-health` | `X-Admin-Password` | GPSDO lock + GPS fix status |
+| `GET /admin/monitor-health` | `X-Admin-Password` | Per-component health grid + RGB LED state |
 
 ## Project structure
 
@@ -255,8 +260,11 @@ ubersdr_cyd/
 │   ├── slide_antenna.{h,cpp}       # Antenna-switch + rotator compass slide
 │   ├── slide_spectrum.{h,cpp}      # Per-band FFT mini-chart grid (paged)
 │   ├── slide_ranking.{h,cpp}       # PSKReporter / WSPR / RBN ranking slide
-│   ├── notifications.{h,cpp} # Webhook toast queue + overlay renderer
-│   └── debug_log.{h,cpp}     # Rolling debug log served at /debug
+│   ├── slide_gpsdo.{h,cpp}         # GPSDO lock + GPS fix status slide
+│   ├── slide_health.{h,cpp}        # Monitor-health dot grid + detail pages slide
+│   ├── status_led.{h,cpp}          # Onboard RGB LED health-status indicator
+│   ├── notifications.{h,cpp}       # Webhook toast queue + overlay renderer
+│   └── debug_log.{h,cpp}           # Rolling debug log served at /debug
 └── platformio.ini
 ```
 
@@ -278,3 +286,19 @@ All pins are fixed by the CYD board — no external wiring needed.
 | Touch CS | 33 |
 | Touch IRQ | 36 |
 | BOOT button | 0 |
+| RGB LED Red | 4 |
+| RGB LED Green | 16 |
+| RGB LED Blue | 17 |
+
+### Onboard RGB LED — health status indicator
+
+The CYD has a common-anode RGB LED (active-LOW) driven by [`src/status_led.cpp`](src/status_led.cpp). It reflects the UberSDR `/admin/monitor-health` overall status:
+
+| LED colour | Meaning |
+|---|---|
+| 🔵 Blue | Waiting for first health data (device just booted or API unreachable) |
+| 🟢 Green | All components healthy (`healthOverall == 0`) |
+| 🟡 Amber (red + green) | At least one component in WARNING state (`healthOverall == 1`) |
+| 🔴 Red | At least one component CRITICAL (`healthOverall == 2`) |
+
+The LED is updated every 2 seconds and only when the state changes. The green channel (GPIO 16) is safe to use on the ESP32-2432S028R because it uses a bare **ESP32-D0WD-V3** chip, not a WROOM-32 module — GPIO 16 is not connected to the flash /CS line on this board.
