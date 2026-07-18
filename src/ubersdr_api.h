@@ -142,6 +142,25 @@ struct UberSDRSnapshot {
   String wxWindDir;     // compass, e.g. "NW" (empty when no bearing)
   int    wxGustKmh;     // rounded km/h (0 when absent)
 
+  // ── GPSDO (/admin/gpsdo-health) ──
+  bool     gpsdoValid;
+  bool     gpsdoEnabled;
+  bool     gpsdoHealthy;
+  bool     gpsdoGpsLock;
+  bool     gpsdoPllLock;
+  bool     gpsdoAntennaOk;
+  bool     gpsdoOutput1Enabled;
+  String   gpsdoMode;          // "PLL" / "OCXO" etc.
+  uint32_t gpsdoFreqHz;        // reference oscillator frequency in Hz
+  String   gpsdoFix;           // "GPS" / "GNSS" / "None" etc.
+  String   gpsdoFixMode;       // "3D" / "2D" / "None"
+  int      gpsdoSatsUsed;
+  int      gpsdoGpsInView;
+  int      gpsdoGloInView;
+  float    gpsdoHdop;
+  float    gpsdoAltitudeM;
+  String   gpsdoUtc;           // ISO-8601 datetime from GPS, e.g. "2026-07-18T11:36:05Z"
+
   // ── Meta ──
   uint32_t lastSuccessMs;   // millis() of the most recent successful fetch (any)
 };

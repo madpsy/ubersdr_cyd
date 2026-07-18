@@ -35,6 +35,7 @@ enum PollStep : uint8_t {
   kStepPskRank,           // /admin/psk-rank        → PSKReporter spots + DXCC rank
   kStepWsprRank,          // /admin/wspr-rank       → WSPR Live 24h/today/yesterday rank
   kStepRbnRank,           // /admin/rbn-data        → RBN skimmer rank
+  kStepGpsdo,             // /admin/gpsdo-health    → GPSDO lock + GPS fix status
   kNumSteps
 };
 
@@ -797,6 +798,67 @@ void pollWsprRank() {
   g_snap.lastSuccessMs = millis();
 }
 
+// ── GPSDO health (/admin/gpsdo-health) ───────────────────────────────────────
+// Requires admin auth.  Returns 404 when GPSDO is not enabled on the server.
+// On success, populates all gpsdoXxx fields in the snapshot.
+void pollGpsdo() {
+  String body;
+  const int code = httpGet("/admin/gpsdo-health", true, body);
+  if (code != 200) {
+    // 404 = GPSDO not configured; clear the valid flag so the slide is hidden.
+    if (code == 404) g_snap.gpsdoValid = false;
+    debugLogf("gpsdo-health: HTTP %d", code);
+    return;
+  }
+
+  JsonDocument doc;
+  const DeserializationError err = deserializeJson(doc, body);
+  if (err) {
+    debugLogf("gpsdo-health: JSON err %s", err.c_str());
+    return;
+  }
+
+  g_snap.gpsdoEnabled = doc["enabled"] | false;
+  if (!g_snap.gpsdoEnabled) {
+    g_snap.gpsdoValid = false;
+    debugLog("gpsdo-health: disabled");
+    return;
+  }
+
+  g_snap.gpsdoHealthy = doc["healthy"] | false;
+
+  JsonObject dev = doc["device_status"].as<JsonObject>();
+  if (!dev.isNull()) {
+    g_snap.gpsdoGpsLock       = dev["gps_lock"]        | false;
+    g_snap.gpsdoPllLock       = dev["pll_lock"]        | false;
+    g_snap.gpsdoAntennaOk     = dev["antenna_ok"]      | false;
+    g_snap.gpsdoOutput1Enabled= dev["output1_enabled"] | false;
+    g_snap.gpsdoMode          = dev["mode"]            | "";
+    g_snap.gpsdoFreqHz        = dev["frequency_hz"]    | (uint32_t)0;
+  }
+
+  JsonObject gps = doc["gps"].as<JsonObject>();
+  if (!gps.isNull()) {
+    g_snap.gpsdoFix        = gps["fix"]         | "";
+    g_snap.gpsdoFixMode    = gps["fix_mode"]    | "";
+    g_snap.gpsdoSatsUsed   = gps["sats_used"]   | 0;
+    g_snap.gpsdoGpsInView  = gps["gps_in_view"] | 0;
+    g_snap.gpsdoGloInView  = gps["glo_in_view"] | 0;
+    g_snap.gpsdoHdop       = gps["hdop"]        | 0.0f;
+    g_snap.gpsdoAltitudeM  = gps["altitude_m"]  | 0.0f;
+    g_snap.gpsdoUtc        = gps["datetime_utc"] | "";
+  }
+
+  g_snap.gpsdoValid = true;
+  debugLogf("gpsdo-health: healthy=%d gps=%d pll=%d fix=%s/%s sats=%d hdop=%.2f",
+            g_snap.gpsdoHealthy ? 1 : 0,
+            g_snap.gpsdoGpsLock ? 1 : 0,
+            g_snap.gpsdoPllLock ? 1 : 0,
+            g_snap.gpsdoFix.c_str(), g_snap.gpsdoFixMode.c_str(),
+            g_snap.gpsdoSatsUsed, g_snap.gpsdoHdop);
+  g_snap.lastSuccessMs = millis();
+}
+
 // ── RBN skimmer rank (/admin/rbn-data?callsign=CW_SKIMMER_CALLSIGN) ──────────
 // Requires admin auth.  Returns 404 when CW skimmer is not configured.
 // Response: { stats_rank: N, stats_total_skimmers: N, statistics: { spot_count: N } }
@@ -840,6 +902,7 @@ void runStep(uint8_t step) {
     case kStepPskRank:     pollPskRank();     break;
     case kStepWsprRank:    pollWsprRank();    break;
     case kStepRbnRank:     pollRbnRank();     break;
+    case kStepGpsdo:       pollGpsdo();       break;
     default: break;
   }
 }
