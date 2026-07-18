@@ -351,6 +351,16 @@
         (the CYD's USB-serial chip). Linux and macOS need no driver.
       </div>
 
+      <div class="warn">
+        ⚠️ <strong>"Failed to initialize"?</strong> The browser couldn't switch the board into
+        download mode — common with the CYD's CH340 chip. First close anything else using the
+        serial port (e.g. a serial monitor). Then <strong>hold the BOOT button</strong> (next to
+        RST on the board edge) <strong>while clicking Install</strong>, keeping it held until
+        writing starts. Still stuck? With BOOT held, tap RST, then release BOOT a second later —
+        the board is now in download mode — and click Install again. Tap RST after flashing if
+        it doesn't reboot by itself.
+      </div>
+
       <h2>After flashing</h2>
 
       <ol class="steps">
