@@ -10,6 +10,7 @@
 #include "notifications.h"
 #include "settings.h"
 #include "slideshow.h"
+#include "ubersdr_api.h"
 
 // ── Hardware ──────────────────────────────────────────────────────────────────
 
@@ -688,6 +689,17 @@ void displayUpdate(const SystemSnapshot& snap) {
       slideshowActivate();
       g_dirty = false;
     }
+
+    // ── API reachability toasts (fired on Core 1 to keep notifications thread-safe)
+    if (g_apiWentDown) {
+      g_apiWentDown = false;
+      notificationsPush("API", "Cannot reach UberSDR server");
+    }
+    if (g_apiWentUp) {
+      g_apiWentUp = false;
+      notificationsPush("API", "UberSDR server recovered");
+    }
+
     // Hold auto-advance while a toast overlays the content (clock keeps ticking).
     slideshowTick(!notificationsActive());
     const bool contentRepainted = slideshowDraw();

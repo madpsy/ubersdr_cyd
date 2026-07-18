@@ -5,12 +5,15 @@
 #include <ESPmDNS.h>
 #include <WebServer.h>
 #include <WiFi.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 #include "connectivity.h"
 #include "debug_log.h"
 #include "display.h"
 #include "notifications.h"
 #include "settings.h"
+#include "ubersdr_api.h"
 
 namespace {
 constexpr byte kDnsPort = 53;
@@ -159,7 +162,8 @@ String pageHtml(const String& message = "") {
   html += F("<div>Hotspot: <strong class='");
   html += hotspotActive ? F("warn'>on") : F("ok'>off");
   html += F("</strong></div>");
-  html += F("<div><a href='/debug' style='color:#1aa7c8'>View debug log &raquo;</a></div>");
+  html += F("<div><a href='/debug' style='color:#1aa7c8'>View debug log &raquo;</a>"
+            " &nbsp; <a href='/debug/tasks' style='color:#1aa7c8'>Task info &raquo;</a></div>");
   html += F("</div>");
 
   // ── Settings form ──
@@ -297,6 +301,23 @@ void handleDebug() {
   server.send(200, "text/plain; charset=utf-8", debugLogDump());
 }
 
+void handleDebugTasks() {
+  // Reports the API background task stack high-water mark.
+  // uxTaskGetSystemState() requires configUSE_TRACE_FACILITY=1 which is not
+  // enabled in the Arduino-ESP32 framework defaults, so we report only the
+  // values we can obtain without it.
+  String json;
+  json.reserve(128);
+  json = "{\"api_task_hwm_bytes\":";
+  json += String(ubersdrApiGetStackHwm());
+  json += ",\"free_heap_bytes\":";
+  json += String(ESP.getFreeHeap());
+  json += ",\"min_free_heap_bytes\":";
+  json += String(ESP.getMinFreeHeap());
+  json += "}";
+  server.send(200, "application/json", json);
+}
+
 // POST/GET /notify — webhook receiver for UberSDR's Generic-webhook
 // notification channel (LAN only, no auth).  Accepts:
 //   - text/plain body: the message itself             (webhook_format: text)
@@ -361,6 +382,7 @@ void setupPortalBegin() {
   server.on("/reboot",             HTTP_POST, handleReboot);
   server.on("/reboot",             HTTP_GET,  handleRebootGet);
   server.on("/debug",              HTTP_GET,  handleDebug);
+  server.on("/debug/tasks",        HTTP_GET,  handleDebugTasks);
   server.on("/notify",             HTTP_POST, handleNotify);
   server.on("/notify",             HTTP_GET,  handleNotify);   // curl testing
   // Captive-portal detection endpoints

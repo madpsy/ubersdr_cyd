@@ -186,15 +186,27 @@ struct UberSDRSnapshot {
 };
 
 // Initialise the API client (records config, resets snapshot).
+// Call once in setup() before ubersdrApiTaskBegin().
 void ubersdrApiBegin();
 
-// Must be called every loop() iteration.  Fires one HTTP request per poll
-// cycle (round-robins across endpoints to keep each request short).
-// Safe to call before WiFi connects — it simply does nothing until connected.
-void ubersdrApiLoop();
+// Create the FreeRTOS background task that polls UberSDR endpoints on Core 0,
+// keeping the display loop on Core 1 free of HTTP blocking.
+// Call once in setup(), after ubersdrApiBegin().
+void ubersdrApiTaskBegin();
 
-// Returns a const reference to the latest aggregated snapshot.
-const UberSDRSnapshot& getUberSDRSnapshot();
+// Returns a thread-safe copy of the latest aggregated snapshot.
+UberSDRSnapshot getUberSDRSnapshot();
 
-// Force an immediate re-poll on the next loop (e.g. after WiFi reconnects).
+// Force an immediate re-poll on the next task iteration (e.g. after WiFi reconnects).
 void ubersdrApiRefresh();
+
+// Returns the FreeRTOS stack high-water mark for the API task in bytes free.
+// Returns 0 before the task has started.
+uint32_t ubersdrApiGetStackHwm();
+
+// ── Reachability transition flags ─────────────────────────────────────────────
+// Set by the API task (Core 0); consumed by the display loop (Core 1) which
+// calls notificationsPush() itself so notifications stay on one core.
+// The display loop must clear each flag after consuming it.
+extern volatile bool g_apiWentDown;   // true on the down-transition
+extern volatile bool g_apiWentUp;     // true on the up-transition (recovery)

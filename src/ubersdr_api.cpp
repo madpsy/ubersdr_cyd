@@ -11,10 +11,19 @@
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <WiFiClientSecure.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#include <freertos/task.h>
 
 #include "debug_log.h"
-#include "notifications.h"
 #include "settings.h"
+
+// ── Reachability transition flags ────────────────────────────────────────────
+// Defined at file scope (not inside the anonymous namespace) so they are
+// accessible both from the task (inside the namespace via extern) and from
+// the display loop (Core 1) via the header's extern declarations.
+volatile bool g_apiWentDown = false;
+volatile bool g_apiWentUp   = false;
 
 namespace {
 
@@ -42,21 +51,30 @@ enum PollStep : uint8_t {
   kNumSteps
 };
 
-UberSDRSnapshot g_snap;
-uint8_t         g_step          = 0;
-uint32_t        g_lastStepMs    = 0;
-bool            g_forceRefresh  = false;
-int             g_spectrumBand  = 0;   // round-robin index for per-band FFT
+// ── Shared snapshot + mutex ───────────────────────────────────────────────────
+// g_work  — written by the API task (Core 0) during HTTP fetch, no mutex needed
+//           because only the API task ever writes to it.
+// g_snap  — published copy; written by the API task under g_snapMutex after each
+//           successful step, read by Core 1 under g_snapMutex via getUberSDRSnapshot().
+// The mutex is held only for the brief g_snap = g_work copy, never during HTTP I/O.
+UberSDRSnapshot   g_work;
+UberSDRSnapshot   g_snap;
+SemaphoreHandle_t g_snapMutex    = nullptr;
 
-// ── API reachability tracking ─────────────────────────────────────────────────
-// We consider the API "down" after kFailThreshold consecutive steps all fail
-// (i.e. lastSuccessMs has not advanced).  A toast is fired once on the
-// down-transition and once on the up-transition (recovery).  The threshold is
-// intentionally larger than one step so a single slow request doesn't spam.
-constexpr uint8_t  kFailThreshold  = 6;   // ~12 s of consecutive failures
-uint8_t            g_failStreak    = 0;   // steps since last success
-bool               g_apiWasDown    = false;
-uint32_t           g_lastKnownSuccessMs = 0;   // snapshot of lastSuccessMs at last check
+uint8_t           g_step         = 0;
+bool              g_forceRefresh = false;
+int               g_spectrumBand = 0;   // round-robin index for per-band FFT
+
+// ── Task handle + HWM ────────────────────────────────────────────────────────
+TaskHandle_t      g_apiTaskHandle = nullptr;
+volatile uint32_t g_apiTaskHwm   = 0;   // updated periodically by the task
+
+// ── Reachability tracking (task-private) ─────────────────────────────────────
+// Down-transition fires after kFailThreshold consecutive steps with no success.
+constexpr uint8_t kFailThreshold       = 6;   // ~12 s of consecutive failures
+uint8_t           g_failStreak         = 0;
+bool              g_apiWasDown         = false;
+uint32_t          g_lastKnownSuccessMs = 0;
 
 // ── HTTP helper ───────────────────────────────────────────────────────────────
 // Performs a blocking GET and returns the response body in `out`.
@@ -334,35 +352,35 @@ void pollDescription() {
   // So current users = max_clients - available_clients.  This matches the
   // server's own unique-user accounting exactly (no per-session guessing).
   if (doc["max_clients"].is<int>()) {
-    g_snap.maxSessions = doc["max_clients"].as<int>();
+    g_work.maxSessions = doc["max_clients"].as<int>();
   }
   if (doc["available_clients"].is<int>()) {
     const int avail = doc["available_clients"].as<int>();
-    int used = g_snap.maxSessions - avail;
+    int used = g_work.maxSessions - avail;
     if (used < 0) used = 0;
-    g_snap.userCount  = used;
-    g_snap.usersValid = true;
+    g_work.userCount  = used;
+    g_work.usersValid = true;
   }
 
   // Instance callsign (shown in the header).
-  g_snap.callsign = doc["receiver"]["callsign"] | "";
+  g_work.callsign = doc["receiver"]["callsign"] | "";
 
   // CW skimmer callsign (may differ from receiver callsign; used for RBN rank).
-  g_snap.cwSkimmerCallsign = doc["cw_skimmer_callsign"] | "";
+  g_work.cwSkimmerCallsign = doc["cw_skimmer_callsign"] | "";
 
   // Instance local-time offset (DST-adjusted, minutes) from receiver block.
   JsonVariant tz = doc["receiver"]["timezone_offset"];
   if (tz.is<int>()) {
-    g_snap.tzOffsetMinutes = tz.as<int>();
-    g_snap.tzValid = true;
+    g_work.tzOffsetMinutes = tz.as<int>();
+    g_work.tzValid = true;
   }
 
   // Antenna switch — the "ant_switch" key exists ONLY when the switch is
   // enabled on the server.  Join active_labels into a display string.
   JsonObject asw = doc["ant_switch"].as<JsonObject>();
   if (!asw.isNull()) {
-    g_snap.antSwitchEnabled  = asw["enabled"] | false;
-    g_snap.antSwitchGrounded = asw["grounded"] | false;
+    g_work.antSwitchEnabled  = asw["enabled"] | false;
+    g_work.antSwitchGrounded = asw["grounded"] | false;
     String labels;
     JsonArray al = asw["active_labels"].as<JsonArray>();
     if (!al.isNull()) {
@@ -371,27 +389,27 @@ void pollDescription() {
         labels += String(v.as<const char*>());
       }
     }
-    g_snap.antSwitchLabels = labels;
+    g_work.antSwitchLabels = labels;
   } else {
-    g_snap.antSwitchEnabled = false;
+    g_work.antSwitchEnabled = false;
   }
 
   // Rotator — always present in the payload; only meaningful when enabled.
   JsonObject rot = doc["rotator"].as<JsonObject>();
   if (!rot.isNull()) {
-    g_snap.rotatorEnabled   = rot["enabled"]   | false;
-    g_snap.rotatorConnected = rot["connected"] | false;
-    g_snap.rotatorAzimuth   = rot["azimuth"]   | -1;
+    g_work.rotatorEnabled   = rot["enabled"]   | false;
+    g_work.rotatorConnected = rot["connected"] | false;
+    g_work.rotatorAzimuth   = rot["azimuth"]   | -1;
   } else {
-    g_snap.rotatorEnabled = false;
+    g_work.rotatorEnabled = false;
   }
 
   debugLogf("description: max=%d used=%d tz=%dmin sw=%d rot=%d/%d az=%d",
-            g_snap.maxSessions, g_snap.userCount, g_snap.tzOffsetMinutes,
-            g_snap.antSwitchEnabled ? 1 : 0,
-            g_snap.rotatorEnabled ? 1 : 0, g_snap.rotatorConnected ? 1 : 0,
-            g_snap.rotatorAzimuth);
-  g_snap.lastSuccessMs = millis();
+            g_work.maxSessions, g_work.userCount, g_work.tzOffsetMinutes,
+            g_work.antSwitchEnabled ? 1 : 0,
+            g_work.rotatorEnabled ? 1 : 0, g_work.rotatorConnected ? 1 : 0,
+            g_work.rotatorAzimuth);
+  g_work.lastSuccessMs = millis();
 }
 
 void pollSessions() {
@@ -421,22 +439,22 @@ void pollSessions() {
 
   // ── Compact server response: counts computed server-side ──
   if (doc["bypassed_users"].is<int>()) {
-    g_snap.bypassCount = doc["bypassed_users"].as<int>();
-    if (doc["max_sessions"].is<int>()) g_snap.maxSessions = doc["max_sessions"].as<int>();
-    if (doc["users"].is<int>())        g_snap.userCount   = doc["users"].as<int>();
-    g_snap.usersValid = true;
+    g_work.bypassCount = doc["bypassed_users"].as<int>();
+    if (doc["max_sessions"].is<int>()) g_work.maxSessions = doc["max_sessions"].as<int>();
+    if (doc["users"].is<int>())        g_work.userCount   = doc["users"].as<int>();
+    g_work.usersValid = true;
 
     // Network aggregates only exist in the compact payload.
-    g_snap.externalSessions = doc["external_sessions"] | 0;
-    g_snap.audioKbps        = doc["audio_kbps"]        | 0;
-    g_snap.waterfallKbps    = doc["waterfall_kbps"]    | 0;
-    g_snap.totalKbps        = doc["total_kbps"]        | 0;
-    g_snap.netValid = true;
+    g_work.externalSessions = doc["external_sessions"] | 0;
+    g_work.audioKbps        = doc["audio_kbps"]        | 0;
+    g_work.waterfallKbps    = doc["waterfall_kbps"]    | 0;
+    g_work.totalKbps        = doc["total_kbps"]        | 0;
+    g_work.netValid = true;
 
     debugLogf("sessions: users=%d bypass=%d ext=%d net=%dkbps (compact)",
-              g_snap.userCount, g_snap.bypassCount,
-              g_snap.externalSessions, g_snap.totalKbps);
-    g_snap.lastSuccessMs = millis();
+              g_work.userCount, g_work.bypassCount,
+              g_work.externalSessions, g_work.totalKbps);
+    g_work.lastSuccessMs = millis();
     return;
   }
 
@@ -471,10 +489,10 @@ void pollSessions() {
     if (!seen && nKeys < kMaxKeys) keys[nKeys++] = key;
   }
 
-  g_snap.bypassCount = nKeys;
-  g_snap.usersValid  = true;   // sessions endpoint reachable
+  g_work.bypassCount = nKeys;
+  g_work.usersValid  = true;   // sessions endpoint reachable
   debugLogf("sessions: bypass=%d", nKeys);
-  g_snap.lastSuccessMs = millis();
+  g_work.lastSuccessMs = millis();
 }
 
 void pollLoad() {
@@ -498,19 +516,19 @@ void pollLoad() {
     if (v.is<float>())       return v.as<float>();
     return 0.0f;
   };
-  g_snap.load1  = readLoad("load_1min");
-  g_snap.load5  = readLoad("load_5min");
-  g_snap.load15 = readLoad("load_15min");
-  g_snap.cpuCores = doc["cpu_cores"] | 0;
-  g_snap.cpuTempAvailable = doc["cpu_temp_available"] | false;
-  g_snap.cpuTempC         = doc["cpu_temp_c"] | 0.0f;
-  g_snap.cpuTempThresholdC= doc["cpu_temp_threshold_c"] | 0.0f;
-  g_snap.cpuTempStatus    = doc["cpu_temp_status"] | "";
-  g_snap.loadValid = true;
+  g_work.load1  = readLoad("load_1min");
+  g_work.load5  = readLoad("load_5min");
+  g_work.load15 = readLoad("load_15min");
+  g_work.cpuCores = doc["cpu_cores"] | 0;
+  g_work.cpuTempAvailable = doc["cpu_temp_available"] | false;
+  g_work.cpuTempC         = doc["cpu_temp_c"] | 0.0f;
+  g_work.cpuTempThresholdC= doc["cpu_temp_threshold_c"] | 0.0f;
+  g_work.cpuTempStatus    = doc["cpu_temp_status"] | "";
+  g_work.loadValid = true;
   debugLogf("load: %.2f/%.2f/%.2f cores=%d temp=%.0f",
-            g_snap.load1, g_snap.load5, g_snap.load15,
-            g_snap.cpuCores, g_snap.cpuTempC);
-  g_snap.lastSuccessMs = millis();
+            g_work.load1, g_work.load5, g_work.load15,
+            g_work.cpuCores, g_work.cpuTempC);
+  g_work.lastSuccessMs = millis();
 }
 
 void pollBands() {
@@ -538,27 +556,27 @@ void pollBands() {
     JsonObject m = kv.value().as<JsonObject>();
     if (m.isNull()) continue;
     const float snr = m["ft8_snr"] | 0.0f;
-    g_snap.bands[n].band    = kv.key().c_str();
-    g_snap.bands[n].snr     = snr;
-    g_snap.bands[n].quality = snrQuality(snr);
+    g_work.bands[n].band    = kv.key().c_str();
+    g_work.bands[n].snr     = snr;
+    g_work.bands[n].quality = snrQuality(snr);
     n++;
   }
 
   // Sort by ascending centre frequency (160m/1.8 MHz first … 10m/28 MHz last).
   for (int i = 0; i < n - 1; ++i) {
     for (int j = 0; j < n - 1 - i; ++j) {
-      if (bandFreqKhz(g_snap.bands[j].band) > bandFreqKhz(g_snap.bands[j + 1].band)) {
-        BandCondition tmp = g_snap.bands[j];
-        g_snap.bands[j] = g_snap.bands[j + 1];
-        g_snap.bands[j + 1] = tmp;
+      if (bandFreqKhz(g_work.bands[j].band) > bandFreqKhz(g_work.bands[j + 1].band)) {
+        BandCondition tmp = g_work.bands[j];
+        g_work.bands[j] = g_work.bands[j + 1];
+        g_work.bands[j + 1] = tmp;
       }
     }
   }
 
-  g_snap.bandCount = n;
-  g_snap.bandsValid = (n > 0);
+  g_work.bandCount = n;
+  g_work.bandsValid = (n > 0);
   debugLogf("bands: %d bands", n);
-  if (n > 0) g_snap.lastSuccessMs = millis();
+  if (n > 0) g_work.lastSuccessMs = millis();
 }
 
 void pollSpace() {
@@ -573,14 +591,14 @@ void pollSpace() {
     return;
   }
 
-  g_snap.kIndex     = doc["k_index"]  | 0;
-  g_snap.aIndex     = doc["a_index"]  | 0;
-  g_snap.solarFlux  = doc["solar_flux"] | 0.0f;
-  g_snap.propQuality= doc["propagation_quality"] | "";
-  g_snap.spaceValid = true;
-  debugLogf("space: K=%d A=%d flux=%.0f q=%s", g_snap.kIndex, g_snap.aIndex,
-            g_snap.solarFlux, g_snap.propQuality.c_str());
-  g_snap.lastSuccessMs = millis();
+  g_work.kIndex     = doc["k_index"]  | 0;
+  g_work.aIndex     = doc["a_index"]  | 0;
+  g_work.solarFlux  = doc["solar_flux"] | 0.0f;
+  g_work.propQuality= doc["propagation_quality"] | "";
+  g_work.spaceValid = true;
+  debugLogf("space: K=%d A=%d flux=%.0f q=%s", g_work.kIndex, g_work.aIndex,
+            g_work.solarFlux, g_work.propQuality.c_str());
+  g_work.lastSuccessMs = millis();
 }
 
 // Title-case a lowercase OWM description ("light rain" → "Light Rain").
@@ -620,43 +638,43 @@ void pollWeather() {
     return;
   }
 
-  g_snap.wxDescription = titleCase(String(wx[0]["description"] | ""));
-  g_snap.wxMain        = wx[0]["main"] | "";
-  g_snap.wxLocation    = doc["name"] | "";
+  g_work.wxDescription = titleCase(String(wx[0]["description"] | ""));
+  g_work.wxMain        = wx[0]["main"] | "";
+  g_work.wxLocation    = doc["name"] | "";
 
-  g_snap.wxTempC    = doc["main"]["temp"]     | 0.0f;
-  g_snap.wxHumidity = doc["main"]["humidity"] | 0;
-  g_snap.wxPressure = doc["main"]["pressure"] | 0;
+  g_work.wxTempC    = doc["main"]["temp"]     | 0.0f;
+  g_work.wxHumidity = doc["main"]["humidity"] | 0;
+  g_work.wxPressure = doc["main"]["pressure"] | 0;
 
   const float windMs = doc["wind"]["speed"] | 0.0f;
-  g_snap.wxWindKmh = static_cast<int>(windMs * 3.6f + 0.5f);
+  g_work.wxWindKmh = static_cast<int>(windMs * 3.6f + 0.5f);
 
   if (doc["wind"]["deg"].is<int>() || doc["wind"]["deg"].is<float>()) {
-    g_snap.wxWindDir = windCompass(doc["wind"]["deg"].as<int>());
+    g_work.wxWindDir = windCompass(doc["wind"]["deg"].as<int>());
   } else {
-    g_snap.wxWindDir = "";
+    g_work.wxWindDir = "";
   }
 
   const float gustMs = doc["wind"]["gust"] | 0.0f;
-  g_snap.wxGustKmh = gustMs > 0 ? static_cast<int>(gustMs * 3.6f + 0.5f) : 0;
+  g_work.wxGustKmh = gustMs > 0 ? static_cast<int>(gustMs * 3.6f + 0.5f) : 0;
 
-  g_snap.weatherValid = true;
+  g_work.weatherValid = true;
   debugLogf("weather: %s %.0fC H%d%% %dkm/h",
-            g_snap.wxDescription.c_str(), g_snap.wxTempC,
-            g_snap.wxHumidity, g_snap.wxWindKmh);
-  g_snap.lastSuccessMs = millis();
+            g_work.wxDescription.c_str(), g_work.wxTempC,
+            g_work.wxHumidity, g_work.wxWindKmh);
+  g_work.lastSuccessMs = millis();
 }
 
-// Staging buffer keyed by band index (parallel to g_snap.bands[]).  Fetched
+// Staging buffer keyed by band index (parallel to g_work.bands[]).  Fetched
 // spectra accumulate here across poll cycles; each cycle we compact the valid
-// ones into g_snap.spectrum[] for rendering.  Kept in .bss (file scope) so it
+// ones into g_work.spectrum[] for rendering.  Kept in .bss (file scope) so it
 // doesn't consume stack.
 BandSpectrum g_specStage[kMaxBands];
 
 // Fetch + downsample one band's FFT into the staging slot g_specStage[idx].
 // Returns true if a valid curve was captured.
 bool fetchBandSpectrum(int idx) {
-  const String band = g_snap.bands[idx].band;
+  const String band = g_work.bands[idx].band;
 
   String path = "/api/noisefloor/fft?band=" + band;
   String body;
@@ -726,11 +744,11 @@ bool fetchBandSpectrum(int idx) {
 
 // Spectrum step: fetch a few bands per poll cycle (keeps each step short) into
 // the staging buffer, then compact ALL valid staged bands (in band order) into
-// g_snap.spectrum[] so the slide shows only real data with the correct page
+// g_work.spectrum[] so the slide shows only real data with the correct page
 // count.  Staging is keyed by band index, so re-fetching a band updates it in
 // place rather than duplicating.
 void pollSpectrum() {
-  const int nb = g_snap.bandCount;
+  const int nb = g_work.bandCount;
   if (nb <= 0) return;   // no band list yet
 
   constexpr int kFetchPerCycle = 3;
@@ -741,19 +759,19 @@ void pollSpectrum() {
   }
 
   // Compact staged → render array, preserving band order (low→high, matching
-  // g_snap.bands[] which pollBands() already sorted by wavelength).
+  // g_work.bands[] which pollBands() already sorted by wavelength).
   int w = 0;
   for (int r = 0; r < nb && w < kMaxBands; ++r) {
     if (g_specStage[r].valid) {
-      g_snap.spectrum[w] = g_specStage[r];
+      g_work.spectrum[w] = g_specStage[r];
       w++;
     }
   }
-  g_snap.spectrumCount = w;
-  g_snap.spectrumValid = w > 0;
+  g_work.spectrumCount = w;
+  g_work.spectrumValid = w > 0;
 
   debugLogf("fft: %d/%d bands have data", w, nb);
-  if (w > 0) g_snap.lastSuccessMs = millis();
+  if (w > 0) g_work.lastSuccessMs = millis();
 }
 
 // ── PSKReporter rank (/admin/psk-rank?callsign=CALL) ─────────────────────────
@@ -761,8 +779,8 @@ void pollSpectrum() {
 // server, or when the callsign has no data yet.  Both cases are treated as
 // "not available" (pskValid stays false).
 void pollPskRank() {
-  if (g_snap.callsign.length() == 0) return;   // need callsign first
-  String path = "/admin/psk-rank?callsign=" + g_snap.callsign;
+  if (g_work.callsign.length() == 0) return;   // need callsign first
+  String path = "/admin/psk-rank?callsign=" + g_work.callsign;
   String body;
   const int code = httpGet(path.c_str(), true, body);
   if (code != 200) {
@@ -783,15 +801,15 @@ void pollPskRank() {
   const int dxccRank  = cty["rank"] | 0;
   if (spotsRank == 0 && dxccRank == 0) return;   // no data for this callsign
 
-  g_snap.pskSpotsRank = spotsRank;
-  g_snap.pskSpotsDay  = rep["day"]  | 0;
-  g_snap.pskDxccRank  = dxccRank;
-  g_snap.pskDxccDay   = cty["day"]  | 0;
-  g_snap.pskValid     = true;
+  g_work.pskSpotsRank = spotsRank;
+  g_work.pskSpotsDay  = rep["day"]  | 0;
+  g_work.pskDxccRank  = dxccRank;
+  g_work.pskDxccDay   = cty["day"]  | 0;
+  g_work.pskValid     = true;
   debugLogf("psk-rank: spots #%d (%d/day) dxcc #%d (%d/day)",
-            g_snap.pskSpotsRank, g_snap.pskSpotsDay,
-            g_snap.pskDxccRank,  g_snap.pskDxccDay);
-  g_snap.lastSuccessMs = millis();
+            g_work.pskSpotsRank, g_work.pskSpotsDay,
+            g_work.pskDxccRank,  g_work.pskDxccDay);
+  g_work.lastSuccessMs = millis();
 }
 
 // ── WSPR Live rank (/admin/wspr-rank?callsign=CALL) ──────────────────────────
@@ -799,8 +817,8 @@ void pollPskRank() {
 // The response has three windows: rolling_24h, today, yesterday.
 // Each window's data[] array has 0 or 1 rows (filtered by callsign).
 void pollWsprRank() {
-  if (g_snap.callsign.length() == 0) return;
-  String path = "/admin/wspr-rank?callsign=" + g_snap.callsign;
+  if (g_work.callsign.length() == 0) return;
+  String path = "/admin/wspr-rank?callsign=" + g_work.callsign;
   String body;
   const int code = httpGet(path.c_str(), true, body);
   if (code != 200) {
@@ -828,16 +846,16 @@ void pollWsprRank() {
 
   if (r24 == 0 && rTod == 0 && rYest == 0) return;   // no data
 
-  g_snap.wsprRank24h     = r24;
-  g_snap.wsprUnique24h   = u24;
-  g_snap.wsprRankToday   = rTod;
-  g_snap.wsprUniqueToday = uTod;
-  g_snap.wsprRankYest    = rYest;
-  g_snap.wsprUniqueYest  = uYest;
-  g_snap.wsprValid       = true;
+  g_work.wsprRank24h     = r24;
+  g_work.wsprUnique24h   = u24;
+  g_work.wsprRankToday   = rTod;
+  g_work.wsprUniqueToday = uTod;
+  g_work.wsprRankYest    = rYest;
+  g_work.wsprUniqueYest  = uYest;
+  g_work.wsprValid       = true;
   debugLogf("wspr-rank: 24h #%d (%d uniq) today #%d (%d uniq)",
             r24, u24, rTod, uTod);
-  g_snap.lastSuccessMs = millis();
+  g_work.lastSuccessMs = millis();
 }
 
 // ── GPSDO health (/admin/gpsdo-health) ───────────────────────────────────────
@@ -848,7 +866,7 @@ void pollGpsdo() {
   const int code = httpGet("/admin/gpsdo-health", true, body);
   if (code != 200) {
     // 404 = GPSDO not configured; clear the valid flag so the slide is hidden.
-    if (code == 404) g_snap.gpsdoValid = false;
+    if (code == 404) g_work.gpsdoValid = false;
     debugLogf("gpsdo-health: HTTP %d", code);
     return;
   }
@@ -860,53 +878,53 @@ void pollGpsdo() {
     return;
   }
 
-  g_snap.gpsdoEnabled = doc["enabled"] | false;
-  if (!g_snap.gpsdoEnabled) {
-    g_snap.gpsdoValid = false;
+  g_work.gpsdoEnabled = doc["enabled"] | false;
+  if (!g_work.gpsdoEnabled) {
+    g_work.gpsdoValid = false;
     debugLog("gpsdo-health: disabled");
     return;
   }
 
-  g_snap.gpsdoHealthy = doc["healthy"] | false;
+  g_work.gpsdoHealthy = doc["healthy"] | false;
 
   JsonObject dev = doc["device_status"].as<JsonObject>();
   if (!dev.isNull()) {
-    g_snap.gpsdoGpsLock       = dev["gps_lock"]        | false;
-    g_snap.gpsdoPllLock       = dev["pll_lock"]        | false;
-    g_snap.gpsdoAntennaOk     = dev["antenna_ok"]      | false;
-    g_snap.gpsdoOutput1Enabled= dev["output1_enabled"] | false;
-    g_snap.gpsdoMode          = dev["mode"]            | "";
-    g_snap.gpsdoFreqHz        = dev["frequency_hz"]    | (uint32_t)0;
+    g_work.gpsdoGpsLock       = dev["gps_lock"]        | false;
+    g_work.gpsdoPllLock       = dev["pll_lock"]        | false;
+    g_work.gpsdoAntennaOk     = dev["antenna_ok"]      | false;
+    g_work.gpsdoOutput1Enabled= dev["output1_enabled"] | false;
+    g_work.gpsdoMode          = dev["mode"]            | "";
+    g_work.gpsdoFreqHz        = dev["frequency_hz"]    | (uint32_t)0;
   }
 
   JsonObject gps = doc["gps"].as<JsonObject>();
   if (!gps.isNull()) {
-    g_snap.gpsdoFix        = gps["fix"]         | "";
-    g_snap.gpsdoFixMode    = gps["fix_mode"]    | "";
-    g_snap.gpsdoSatsUsed   = gps["sats_used"]   | 0;
-    g_snap.gpsdoGpsInView  = gps["gps_in_view"] | 0;
-    g_snap.gpsdoGloInView  = gps["glo_in_view"] | 0;
-    g_snap.gpsdoHdop       = gps["hdop"]        | 0.0f;
-    g_snap.gpsdoAltitudeM  = gps["altitude_m"]  | 0.0f;
-    g_snap.gpsdoUtc        = gps["datetime_utc"] | "";
+    g_work.gpsdoFix        = gps["fix"]         | "";
+    g_work.gpsdoFixMode    = gps["fix_mode"]    | "";
+    g_work.gpsdoSatsUsed   = gps["sats_used"]   | 0;
+    g_work.gpsdoGpsInView  = gps["gps_in_view"] | 0;
+    g_work.gpsdoGloInView  = gps["glo_in_view"] | 0;
+    g_work.gpsdoHdop       = gps["hdop"]        | 0.0f;
+    g_work.gpsdoAltitudeM  = gps["altitude_m"]  | 0.0f;
+    g_work.gpsdoUtc        = gps["datetime_utc"] | "";
   }
 
-  g_snap.gpsdoValid = true;
+  g_work.gpsdoValid = true;
   debugLogf("gpsdo-health: healthy=%d gps=%d pll=%d fix=%s/%s sats=%d hdop=%.2f",
-            g_snap.gpsdoHealthy ? 1 : 0,
-            g_snap.gpsdoGpsLock ? 1 : 0,
-            g_snap.gpsdoPllLock ? 1 : 0,
-            g_snap.gpsdoFix.c_str(), g_snap.gpsdoFixMode.c_str(),
-            g_snap.gpsdoSatsUsed, g_snap.gpsdoHdop);
-  g_snap.lastSuccessMs = millis();
+            g_work.gpsdoHealthy ? 1 : 0,
+            g_work.gpsdoGpsLock ? 1 : 0,
+            g_work.gpsdoPllLock ? 1 : 0,
+            g_work.gpsdoFix.c_str(), g_work.gpsdoFixMode.c_str(),
+            g_work.gpsdoSatsUsed, g_work.gpsdoHdop);
+  g_work.lastSuccessMs = millis();
 }
 
 // ── RBN skimmer rank (/admin/rbn-data?callsign=CW_SKIMMER_CALLSIGN) ──────────
 // Requires admin auth.  Returns 404 when CW skimmer is not configured.
 // Response: { stats_rank: N, stats_total_skimmers: N, statistics: { spot_count: N } }
 void pollRbnRank() {
-  if (g_snap.cwSkimmerCallsign.length() == 0) return;   // no CW skimmer configured
-  String path = "/admin/rbn-data?callsign=" + g_snap.cwSkimmerCallsign;
+  if (g_work.cwSkimmerCallsign.length() == 0) return;   // no CW skimmer configured
+  String path = "/admin/rbn-data?callsign=" + g_work.cwSkimmerCallsign;
   String body;
   const int code = httpGet(path.c_str(), true, body);
   if (code != 200) {
@@ -923,13 +941,13 @@ void pollRbnRank() {
 
   if (rank == 0 && total == 0) return;   // no data
 
-  g_snap.rbnRank  = rank;
-  g_snap.rbnTotal = total;
-  g_snap.rbnSpots = spots;
-  g_snap.rbnValid = true;
+  g_work.rbnRank  = rank;
+  g_work.rbnTotal = total;
+  g_work.rbnSpots = spots;
+  g_work.rbnValid = true;
   debugLogf("rbn-data: rank #%d / %d skimmers, %d spots",
             rank, total, spots);
-  g_snap.lastSuccessMs = millis();
+  g_work.lastSuccessMs = millis();
 }
 
 // ── Monitor health (/admin/monitor-health) ───────────────────────────────────
@@ -962,7 +980,7 @@ void pollHealth() {
     return 0;
   };
 
-  g_snap.healthOverall = parseStatus(doc["overall"] | "ok");
+  g_work.healthOverall = parseStatus(doc["overall"] | "ok");
 
   JsonArray items = doc["items"].as<JsonArray>();
   int n = 0;
@@ -972,10 +990,10 @@ void pollHealth() {
       const char* name = item["name"] | "";
       const char* stat = item["status"] | "ok";
       // Truncate name to fit the fixed char[20] buffer (19 chars + NUL).
-      strncpy(g_snap.healthItems[n].name, name,
-              sizeof(g_snap.healthItems[n].name) - 1);
-      g_snap.healthItems[n].name[sizeof(g_snap.healthItems[n].name) - 1] = '\0';
-      g_snap.healthItems[n].status = parseStatus(stat);
+      strncpy(g_work.healthItems[n].name, name,
+              sizeof(g_work.healthItems[n].name) - 1);
+      g_work.healthItems[n].name[sizeof(g_work.healthItems[n].name) - 1] = '\0';
+      g_work.healthItems[n].status = parseStatus(stat);
 
       // Parse issues[] array — store up to kMaxHealthIssues strings.
       int ni = 0;
@@ -983,18 +1001,18 @@ void pollHealth() {
       if (!issues.isNull()) {
         for (JsonVariant v : issues) {
           if (ni >= kMaxHealthIssues) break;
-          g_snap.healthItems[n].issues[ni] = v.as<const char*>();
+          g_work.healthItems[n].issues[ni] = v.as<const char*>();
           ni++;
         }
       }
-      g_snap.healthItems[n].issueCount = ni;
+      g_work.healthItems[n].issueCount = ni;
       n++;
     }
   }
-  g_snap.healthItemCount = n;
-  g_snap.healthValid = true;
-  debugLogf("monitor-health: overall=%d items=%d", g_snap.healthOverall, n);
-  g_snap.lastSuccessMs = millis();
+  g_work.healthItemCount = n;
+  g_work.healthValid = true;
+  debugLogf("monitor-health: overall=%d items=%d", g_work.healthOverall, n);
+  g_work.lastSuccessMs = millis();
 }
 
 void runStep(uint8_t step) {
@@ -1015,19 +1033,84 @@ void runStep(uint8_t step) {
   }
 }
 
+// ── FreeRTOS task ─────────────────────────────────────────────────────────────
+// Runs on Core 0.  Fires one HTTP step per kStepIntervalMs, then yields via
+// vTaskDelay so the WiFi/TCP stack (also Core 0) gets CPU time.
+void apiTask(void* /*param*/) {
+  constexpr uint32_t kHwmLogMs = 30000;
+  uint32_t lastHwmMs = 0;
+
+  for (;;) {
+    if (WiFi.status() == WL_CONNECTED) {
+      const bool wasForced = g_forceRefresh;
+      g_forceRefresh = false;
+      runStep(g_step);   // HTTP fetch — writes to g_work, no mutex held
+      g_step = (g_step + 1) % kNumSteps;
+      const uint32_t successMs = g_work.lastSuccessMs;
+
+      // Commit the updated working snapshot to the published copy under mutex.
+      // This is the only section that holds the mutex, so Core 1 is never
+      // blocked for more than a memcpy (~1 µs).
+      xSemaphoreTake(g_snapMutex, portMAX_DELAY);
+      g_snap = g_work;
+      xSemaphoreGive(g_snapMutex);
+
+      // Reachability check — outside mutex, only touches task-local state and
+      // the two volatile flags (written atomically, read by Core 1).
+      if (successMs != g_lastKnownSuccessMs) {
+        if (g_apiWasDown) {
+          g_apiWentUp = true;
+          debugLog("api: recovered");
+        }
+        g_failStreak         = 0;
+        g_apiWasDown         = false;
+        g_lastKnownSuccessMs = successMs;
+      } else {
+        if (g_failStreak < kFailThreshold) ++g_failStreak;
+        if (g_failStreak >= kFailThreshold && !g_apiWasDown) {
+          g_apiWentDown = true;
+          debugLog("api: unreachable");
+          g_apiWasDown  = true;
+        }
+      }
+
+      // Periodic HWM log.
+      const uint32_t nowMs = millis();
+      if (nowMs - lastHwmMs >= kHwmLogMs) {
+        lastHwmMs = nowMs;
+        const uint32_t hwm =
+            static_cast<uint32_t>(uxTaskGetStackHighWaterMark(nullptr))
+            * sizeof(StackType_t);
+        g_apiTaskHwm = hwm;
+        debugLogf("api task stack HWM: %u bytes free", hwm);
+      }
+
+      if (wasForced) continue;   // skip delay when a refresh was forced
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(kStepIntervalMs));
+  }
+}
+
 }  // namespace
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
 void ubersdrApiBegin() {
-  g_snap = UberSDRSnapshot{};
-  g_snap.maxSessions = 20;   // sensible default until /api/description responds
-  g_step = 0;
-  g_lastStepMs = 0;
-  g_forceRefresh = true;
-  g_failStreak = 0;
-  g_apiWasDown = false;
+  if (!g_snapMutex) g_snapMutex = xSemaphoreCreateMutex();
+
+  // Task not yet started — safe to reset both buffers without the mutex.
+  g_work = UberSDRSnapshot{};
+  g_work.maxSessions = 20;   // sensible default until /api/description responds
+  g_snap = g_work;
+
+  g_step               = 0;
+  g_forceRefresh       = true;
+  g_failStreak         = 0;
+  g_apiWasDown         = false;
   g_lastKnownSuccessMs = 0;
+  g_apiWentDown        = false;
+  g_apiWentUp          = false;
 
   const AppSettings& cfg = getSettings();
   debugLogf("ubersdr api begin: host=%s:%u pw=%s",
@@ -1036,50 +1119,31 @@ void ubersdrApiBegin() {
             cfg.ubersdrPassword.length() ? "set" : "empty");
 }
 
-void ubersdrApiLoop() {
-  if (WiFi.status() != WL_CONNECTED) return;
-
-  const uint32_t nowMs = millis();
-  if (!g_forceRefresh && (nowMs - g_lastStepMs < kStepIntervalMs)) return;
-
-  g_forceRefresh = false;
-  g_lastStepMs = nowMs;
-
-  runStep(g_step);
-  g_step = (g_step + 1) % kNumSteps;
-
-  // ── Reachability toast logic ──────────────────────────────────────────────
-  // After each step, check whether lastSuccessMs has advanced since we last
-  // looked.  If it has, the API is reachable; if not, increment the streak.
-  // Fire a toast only on the down-transition (streak crosses the threshold)
-  // and on the up-transition (recovery after being down).
-  if (g_snap.lastSuccessMs != g_lastKnownSuccessMs) {
-    // At least one endpoint succeeded this step.
-    if (g_apiWasDown) {
-      notificationsPush("API", "UberSDR server recovered");
-      debugLog("api: recovered — toast sent");
-    }
-    g_failStreak         = 0;
-    g_apiWasDown         = false;
-    g_lastKnownSuccessMs = g_snap.lastSuccessMs;
-  } else {
-    // No new success since last check.
-    if (g_failStreak < kFailThreshold) {
-      ++g_failStreak;
-    }
-    if (g_failStreak >= kFailThreshold && !g_apiWasDown) {
-      notificationsPush("API", "Cannot reach UberSDR server");
-      debugLog("api: unreachable — toast sent");
-      g_apiWasDown = true;
-    }
-  }
+void ubersdrApiTaskBegin() {
+  xTaskCreatePinnedToCore(
+    apiTask,           // task function
+    "ubersdr_api",     // name (visible in /debug/tasks)
+    12288,             // stack bytes — TLS + JSON parsing are stack-hungry
+    nullptr,           // parameter
+    1,                 // priority (same as Arduino loop task)
+    &g_apiTaskHandle,  // handle
+    0                  // Core 0 (WiFi/TCP stack also lives here)
+  );
+  debugLog("ubersdr api task started on Core 0");
 }
 
-const UberSDRSnapshot& getUberSDRSnapshot() {
-  return g_snap;
+UberSDRSnapshot getUberSDRSnapshot() {
+  xSemaphoreTake(g_snapMutex, portMAX_DELAY);
+  const UberSDRSnapshot copy = g_snap;
+  xSemaphoreGive(g_snapMutex);
+  return copy;
 }
 
 void ubersdrApiRefresh() {
-  g_step = 0;
+  g_step        = 0;
   g_forceRefresh = true;
+}
+
+uint32_t ubersdrApiGetStackHwm() {
+  return g_apiTaskHwm;
 }

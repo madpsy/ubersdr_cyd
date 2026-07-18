@@ -16,17 +16,17 @@ void setup() {
   delay(100);
 
   settingsBegin();
-  displayBegin();      // initialises TFT + touch + calibration + slideshow
+  displayBegin();         // initialises TFT + touch + calibration + slideshow
   resetButtonBegin();
   setupPortalBegin();
   connectivityBegin();
-  ubersdrApiBegin();   // overview-display API poller
+  ubersdrApiBegin();      // initialise snapshot + mutex
+  ubersdrApiTaskBegin();  // start background polling task on Core 0
 }
 
 void loop() {
   setupPortalLoop();
   connectivityLoop();
-  ubersdrApiLoop();    // polls UberSDR endpoints on a timer (no-op until WiFi up)
 
   const bool resetting = resetButtonLoop();
   if (!resetting) {
