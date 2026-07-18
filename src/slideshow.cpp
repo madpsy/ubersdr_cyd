@@ -64,6 +64,7 @@ uint32_t s_lastDataMs    = 0;        // lastSuccessMs seen at last content draw
 bool     s_drewPlaceholder = false;  // current slide was drawn without data
 String   s_lastClockStr;             // last drawn HH:MM:SS to avoid flicker
 String   s_lastUsersStr;             // last drawn "N/max" user count
+String   s_lastHealthStr;            // last drawn health indicator to avoid flicker
 
 // ── Slide selection helpers ───────────────────────────────────────────────────
 bool slideVisible(int idx, const UberSDRSnapshot& snap) {
@@ -88,8 +89,8 @@ void drawHeader(const UberSDRSnapshot& snap, bool full) {
     tft.fillRect(0, 0, kScreenW, kHeaderH, kColPanel);
     tft.drawFastHLine(0, kHeaderH - 1, kScreenW, kColCardHi);
 
-    // Accent dot + brand (left), followed by the instance callsign in amber.
-    tft.fillCircle(10, kHeaderH / 2, 4, kColAccent);
+    // Brand label + callsign (left).  Health dot is drawn in the live section
+    // below so it updates without a full redraw.
     tft.setTextDatum(ML_DATUM);
     tft.setTextColor(kColText, kColPanel);
     tft.drawString("UberSDR", 20, kHeaderH / 2, 2);
@@ -99,19 +100,44 @@ void drawHeader(const UberSDRSnapshot& snap, bool full) {
       tft.drawString(snap.callsign, brandRight + 8, kHeaderH / 2, 2);
     }
 
-    // Slide counter (centre-right, before the clock).
-    char cnt[12];
-    snprintf(cnt, sizeof(cnt), "%d/%d", s_current + 1, kSlideCount);
-    tft.setTextDatum(MC_DATUM);
-    tft.setTextColor(kColMuted, kColPanel);
-    tft.drawString(cnt, kScreenW / 2 + 40, kHeaderH / 2, 2);
-
-    s_lastClockStr = "";   // force clock repaint
-    s_lastUsersStr = "";   // force users-chip repaint
+    s_lastClockStr  = "";   // force clock repaint
+    s_lastUsersStr  = "";   // force users-chip repaint
+    s_lastHealthStr = "";   // force health dot repaint
   }
 
-  // ── Users chip — live "N/max" with a tiny person glyph (left of the slide
-  // counter).  Redrawn in place whenever the count changes.
+  // ── Health status dot (far left, replaces the old static accent dot) ─────────
+  // Green  circle + checkmark = ok (or no data yet → muted)
+  // Amber  circle + "!"       = warning
+  // Red    circle + "!"       = critical
+  // Redrawn in-place whenever the health state changes.
+  {
+    char hkey[4];
+    if (!snap.healthValid) {
+      hkey[0] = 'n'; hkey[1] = '\0';
+    } else {
+      hkey[0] = '0' + snap.healthOverall; hkey[1] = '\0';
+    }
+    String healthStr(hkey);
+    if (healthStr != s_lastHealthStr || full) {
+      const int16_t cx = 10;
+      const int16_t cy = kHeaderH / 2;
+      tft.fillRect(cx - 6, 2, 14, kHeaderH - 4, kColPanel);   // clear slot
+
+      if (!snap.healthValid) {
+        tft.drawCircle(cx, cy, 5, kColMuted);   // hollow ring = no data yet
+      } else if (snap.healthOverall == 2) {
+        tft.fillCircle(cx, cy, 5, kColBad);     // solid red = critical
+      } else if (snap.healthOverall == 1) {
+        tft.fillCircle(cx, cy, 5, kColWarn);    // solid amber = warning
+      } else {
+        tft.fillCircle(cx, cy, 5, kColGood);    // solid green = ok
+      }
+      s_lastHealthStr = healthStr;
+    }
+  }
+
+  // ── Users chip — live "N/max" with a tiny person glyph.
+  // Redrawn in place whenever the count changes.
   String usersStr;
   if (snap.usersValid) {
     char ub[16];
@@ -180,8 +206,13 @@ void drawFooter(bool full) {
   tft.setTextDatum(ML_DATUM);
   tft.drawString("< prev", 8, y + kFooterH / 2, 2);
 
+  // Centre: slide counter + pause state, e.g. "3/10  auto" or "3/10  paused"
+  char centre[24];
+  snprintf(centre, sizeof(centre), "%d/%d  %s",
+           s_current + 1, kSlideCount,
+           s_paused ? "paused" : "auto");
   tft.setTextDatum(MC_DATUM);
-  tft.drawString(s_paused ? "paused" : "auto", kScreenW / 2, y + kFooterH / 2, 2);
+  tft.drawString(centre, kScreenW / 2, y + kFooterH / 2, 2);
 
   tft.setTextDatum(MR_DATUM);
   tft.drawString("next >", kScreenW - 8, y + kFooterH / 2, 2);
@@ -203,8 +234,9 @@ void slideshowBegin(TFT_eSPI& tft) {
   s_slideStartMs = millis();
   s_lastClockMs = 0;
   s_lastDataMs = 0;
-  s_lastClockStr = "";
-  s_lastUsersStr = "";
+  s_lastClockStr  = "";
+  s_lastUsersStr  = "";
+  s_lastHealthStr = "";
 }
 
 void slideshowActivate() {

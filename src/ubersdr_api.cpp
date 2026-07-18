@@ -927,8 +927,12 @@ void pollRbnRank() {
 void pollHealth() {
   String body;
   const int code = httpGet("/admin/monitor-health", true, body);
-  if (code != 200) {
-    debugLogf("monitor-health: HTTP %d", code);
+  // The server may return non-200 codes to signal degraded health
+  // (e.g. 207 Multi-Status, 503 Service Unavailable).  Accept any response
+  // that has a body worth parsing; only bail on connection failures or
+  // definitive "not available" codes.
+  if (code < 0 || code == 401 || code == 403 || code == 404) {
+    debugLogf("monitor-health: HTTP %d (skip)", code);
     return;
   }
 
