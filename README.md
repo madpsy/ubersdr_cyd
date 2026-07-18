@@ -160,6 +160,50 @@ paginate: override `pageCount()` to return >1 and implement `setPage()`, and the
 slideshow will split the slide's on-screen window evenly across its pages (e.g.
 the Spectrum slide shows 6 band charts per page).
 
+## Architecture / real-time design
+
+### FreeRTOS task model
+
+The ESP32 runs FreeRTOS. The Arduino `loop()` executes as a task on **Core 1**. A second task, `ubersdr_api`, is pinned to **Core 0** (where the WiFi/TCP stack also lives) and handles all HTTP polling. This keeps the display loop on Core 1 completely free of network I/O, so the clock and touch response are never delayed by a slow or unreachable server.
+
+```
+Core 0                              Core 1
+──────────────────────────────      ──────────────────────────────
+ubersdr_api task                    Arduino loop()
+  ├─ httpGet() — up to 4 s           ├─ setupPortalLoop()
+  ├─ parse JSON                       ├─ connectivityLoop()
+  ├─ write g_work (no mutex)          ├─ displayUpdate()
+  ├─ [mutex] g_snap = g_work          │    ├─ slideshowTick()  ← clock
+  └─ vTaskDelay(2 s)                  │    │    └─ [mutex] copy g_snap
+                                      │    └─ slideshowDraw()
+                                      └─ delay(10 ms)
+```
+
+### Double-buffer snapshot
+
+`ubersdr_api.cpp` maintains two `UberSDRSnapshot` structs:
+
+| Buffer | Written by | Protected by |
+|---|---|---|
+| `g_work` | API task (Core 0) during HTTP fetch | nothing — only one writer |
+| `g_snap` | API task (Core 0) after each step | `g_snapMutex` |
+
+After each HTTP step completes, the API task takes the mutex for a ~1 µs `g_snap = g_work` copy, then immediately releases it. Core 1 calls `getUberSDRSnapshot()` which takes the same mutex only long enough to copy `g_snap` into a local value. The mutex is **never held during network I/O**, so Core 1 is never blocked for more than a few microseconds.
+
+### Clock accuracy
+
+The header clock is drawn in-place (no full-screen clear) by [`slideshowTick()`](src/slideshow.cpp) every time `millis()` advances past the next 1-second boundary. Because `loop()` on Core 1 is never blocked by HTTP, the tick fires within a few milliseconds of the correct second.
+
+### API failure toasts
+
+The API task tracks consecutive poll failures. After 6 failures (~12 s) it sets `volatile bool g_apiWentDown = true`. On recovery it sets `g_apiWentUp = true`. These flags are consumed by `displayUpdate()` on Core 1, which calls `notificationsPush()` to show a toast. All UI calls stay on Core 1; the API task never touches the notification queue directly.
+
+### Debug endpoint
+
+`GET /debug/tasks` returns a JSON object with:
+- `api_task_hwm_bytes` — stack high-water mark of the `ubersdr_api` task (sampled every 30 s inside the task via `uxTaskGetStackHighWaterMark()`)
+- `free_heap_bytes` / `min_free_heap_bytes` — current and all-time minimum free heap
+
 ## Polled API endpoints
 
 The overview slideshow polls these endpoints round-robin, one every 2 s (~20 s full cycle):
