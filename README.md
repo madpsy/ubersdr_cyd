@@ -33,7 +33,7 @@ From the settings page you can change:
 | **UberSDR host / port / password** | Point the display at your UberSDR server |
 | **Backlight brightness** | Manual brightness level (5–100 %) |
 | **Auto brightness** | Adjusts backlight automatically using the front light sensor; the manual slider becomes the maximum |
-| **Screen off after** | Blank the screen after N seconds of inactivity (0 = never); tap anywhere or send a `/notify` webhook to wake it |
+| **Screen off after** | Blank the backlight after N seconds of inactivity (0 = never). The screen wakes automatically when you tap it (the tap is consumed — it won't trigger any other action) or when a notification arrives via `POST /notify`. After waking, the screen blanks again after the same timeout if left untouched. |
 | **Enable status LED** | Turn the onboard RGB health-status LED on or off |
 | **Keep setup hotspot always on** | Leave the `UberSDR-Setup` AP running even after joining your Wi-Fi |
 
