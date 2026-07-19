@@ -62,10 +62,17 @@ void BandsSlide::draw(TFT_eSPI& tft, const UberSDRSnapshot& snap, bool full) {
     tft.drawRoundRect(x, y, pillW, pillH, 6, qc);
 
     const int16_t cx = x + pillW / 2;
-    // Band name (e.g. "20m") in white, upper portion.
-    drawText(tft, b.band, cx, y + pillH / 2 - 16, 4, kColText, TC_DATUM);
+    // Strip trailing 'm' from band name (e.g. "20m" → "20") to save space.
+    String bandLabel = b.band;
+    if (bandLabel.endsWith("m") || bandLabel.endsWith("M"))
+      bandLabel.remove(bandLabel.length() - 1);
+    // Band name in white, upper portion.
+    // Font 4 is ~26 px tall; anchor its top at ~25% down the pill so it sits
+    // comfortably in the upper half with clear space below.
+    drawText(tft, bandLabel, cx, y + pillH / 4 - 4, 4, kColText, TC_DATUM);
     // Quality abbreviation in its colour, lower portion.
-    drawText(tft, qualityAbbrev(b.quality), cx, y + pillH / 2 + 10, 2, qc,
+    // Font 2 is ~16 px tall; start it a few px below the pill midpoint.
+    drawText(tft, qualityAbbrev(b.quality), cx, y + pillH * 3 / 5, 2, qc,
              TC_DATUM);
   }
 }

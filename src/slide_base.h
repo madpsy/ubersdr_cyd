@@ -89,4 +89,11 @@ class Slide {
   // Set the page to render on the next draw() call.  The slideshow calls this
   // before draw() when advancing pages.  Default: no-op for single-page slides.
   virtual void setPage(int page) { (void)page; }
+
+  // ── Live-refresh key (optional) ──────────────────────────────────────────
+  // Return a string that changes whenever the slide's displayed data changes.
+  // slideshowDraw() repaints the content area when this key differs from the
+  // value seen at the last draw.  Default returns "" (no live refresh — slide
+  // only repaints on slide/page transitions or placeholder upgrades).
+  virtual String dataKey(const UberSDRSnapshot& snap) const { (void)snap; return ""; }
 };

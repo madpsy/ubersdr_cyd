@@ -28,6 +28,21 @@
 // Maximum number of amateur bands tracked for the band-conditions slide.
 constexpr int kMaxBands = 12;
 
+// Maximum number of non-bypassed user details stored from the compact sessions
+// response (non_bypassed_users map).  Matches the health dot-grid density
+// (2 columns × 8 rows = 16 entries visible on one page).
+constexpr int kMaxUserDetails = 16;
+
+// Per-user detail parsed from the non_bypassed_users map in the compact
+// /admin/sessions?compact=1 response.
+struct UserDetail {
+  char     country[28];      // e.g. "United Kingdom" (truncated, null-terminated)
+  char     countryCode[4];   // e.g. "GB" (null-terminated; empty when absent)
+  time_t   connectedSince;   // UTC epoch parsed from connected_since ISO-8601 string
+  uint32_t frequencyHz;      // audio frequency in Hz (0 when spectrum-only / no audio)
+  char     mode[8];          // e.g. "USB", "LSB", "CW" (uppercased; empty when absent)
+};
+
 // Maximum number of health items stored from /admin/monitor-health.
 constexpr int kMaxHealthItems = 24;
 
@@ -76,6 +91,11 @@ struct UberSDRSnapshot {
   int  userCount;      // unique non-bypassed active users
   int  bypassCount;    // unique bypassed users
   int  maxSessions;    // configured capacity
+
+  // Per-user detail from non_bypassed_users map (compact endpoint only).
+  // Populated when the server returns the map; userDetailCount == 0 otherwise.
+  UserDetail userDetails[kMaxUserDetails];
+  int        userDetailCount;   // 0..kMaxUserDetails
 
   // ── Network stats (/admin/sessions?compact=1 only; netValid false when the
   //    server predates the compact parameter) ──
@@ -206,6 +226,18 @@ void ubersdrApiGetHealth(bool& healthValid, uint8_t& healthOverall);
 
 // Force an immediate re-poll on the next task iteration (e.g. after WiFi reconnects).
 void ubersdrApiRefresh();
+
+// Jump the poll queue so the sessions endpoint fires on the very next tick.
+// Call when the user pauses on the Users slide so user data refreshes within
+// ~2 s instead of waiting up to kNumSteps * kStepIntervalMs for the normal
+// round-robin to reach it.
+void ubersdrApiPrioritiseSessions();
+
+// Request an extra sessions poll on the next task tick without disrupting the
+// normal round-robin.  Safe to call repeatedly (e.g. every 4 s while paused
+// on the Users slide) — the task runs pollSessions() as a bonus step, then
+// resumes the normal sequence so health and other endpoints are not starved.
+void ubersdrApiRequestSessionsFastPoll();
 
 // Returns the FreeRTOS stack high-water mark for the API task in bytes free.
 // Returns 0 before the task has started.

@@ -60,7 +60,9 @@ bool     s_fullRedraw    = true;     // draw chrome + content next frame
 uint32_t s_slideStartMs  = 0;        // millis() when current slide began
 uint32_t s_pageStartMs   = 0;        // millis() when current page began
 uint32_t s_lastClockMs   = 0;        // last header-clock refresh
-uint32_t s_lastDataMs    = 0;        // lastSuccessMs seen at last content draw
+uint32_t s_lastDataMs    = 0;        // lastSuccessMs seen at last content draw (placeholder upgrade)
+String   s_lastDataKey;              // dataKey() value seen at last content draw (live refresh)
+uint32_t s_lastSessionsPriorityMs = 0; // last time we requested a fast sessions poll
 bool     s_drewPlaceholder = false;  // current slide was drawn without data
 String   s_lastClockStr;             // last drawn HH:MM:SS to avoid flicker
 String   s_lastUsersStr;             // last drawn "N/max" user count
@@ -270,10 +272,12 @@ void slideshowBegin(TFT_eSPI& tft) {
   s_slideStartMs = millis();
   s_lastClockMs = 0;
   s_lastDataMs = 0;
+  s_lastDataKey   = "";
   s_lastClockStr  = "";
   s_lastUsersStr  = "";
   s_lastHealthStr = "";
   s_lastIpStr     = "";
+  s_lastSessionsPriorityMs = 0;
 }
 
 void slideshowActivate() {
@@ -296,24 +300,20 @@ bool slideshowDraw() {
   const bool full = s_fullRedraw;
   bool contentPainted = false;
 
-  // Content is drawn ONCE per slide activation (on `full`).  We deliberately do
-  // not repaint on every incoming poll: the 5-endpoint round-robin bumps the
-  // snapshot ~every 2 s, and clearing+redrawing the content area each time
-  // caused a visible flicker.  A slide captures the latest data when it becomes
-  // active; since each slide is shown for 8 s and a full poll cycle is ~10 s,
-  // the on-screen values are always fresh enough.  The header clock still
-  // ticks live (drawn in-place without clearing) via slideshowTick().
-  //
-  // Exception: if the slide was drawn while its section had no data yet, allow a
-  // single content refresh once data arrives so the placeholder is replaced
-  // without waiting for the next rotation.
+  // Content repaint policy:
+  //   1. Full redraw  — on slide/page transition (s_fullRedraw flag).
+  //   2. Data upgrade — one-shot repaint when a placeholder slide gets real data.
+  //   3. Live refresh — repaint when the slide's dataKey() changes (opt-in per slide).
+  //      Only slides that override dataKey() (returning non-empty) participate.
+  //      This avoids clearing+redrawing on every poll tick, preventing flicker.
   if (full) {
     clearContent();
     drawHeader(snap, true);
     drawFooter(true);
     kSlides[s_current]->setPage(s_page);
     kSlides[s_current]->draw(*s_tft, snap, true);
-    s_lastDataMs = snap.lastSuccessMs;
+    s_lastDataMs  = snap.lastSuccessMs;
+    s_lastDataKey = kSlides[s_current]->dataKey(snap);
     s_drewPlaceholder = !kSlides[s_current]->hasData(snap);
     contentPainted = true;
   } else if (s_drewPlaceholder && kSlides[s_current]->hasData(snap)) {
@@ -321,9 +321,21 @@ bool slideshowDraw() {
     clearContent();
     kSlides[s_current]->setPage(s_page);
     kSlides[s_current]->draw(*s_tft, snap, false);
-    s_lastDataMs = snap.lastSuccessMs;
+    s_lastDataMs  = snap.lastSuccessMs;
+    s_lastDataKey = kSlides[s_current]->dataKey(snap);
     s_drewPlaceholder = false;
     contentPainted = true;
+  } else {
+    // Live refresh: only for slides that opt in via dataKey().
+    const String key = kSlides[s_current]->dataKey(snap);
+    if (!key.isEmpty() && key != s_lastDataKey) {
+      clearContent();
+      kSlides[s_current]->setPage(s_page);
+      kSlides[s_current]->draw(*s_tft, snap, false);
+      s_lastDataMs  = snap.lastSuccessMs;
+      s_lastDataKey = key;
+      contentPainted = true;
+    }
   }
 
   s_fullRedraw = false;
@@ -341,13 +353,27 @@ void slideshowTick(bool allowAdvance) {
     drawFooter(false);
   }
 
-  if (!allowAdvance || s_paused) return;
+  // When paused on the Users slide, request an extra sessions poll every 6 s.
+  // 6 s > kStepIntervalMs (2 s) so the bonus step always completes before the
+  // next request, preventing back-to-back sessions polls that would starve
+  // health and other endpoints.
+  if (s_paused && strcmp(kSlides[s_current]->name(), "USERS") == 0) {
+    constexpr uint32_t kFastPollMs = 6000;
+    if (nowMs - s_lastSessionsPriorityMs >= kFastPollMs) {
+      s_lastSessionsPriorityMs = nowMs;
+      ubersdrApiRequestSessionsFastPoll();
+    }
+  }
+
+  if (!allowAdvance) return;
 
   const UberSDRSnapshot& snap = getUberSDRSnapshot();
 
   // Pages within the current slide share the kAutoAdvanceMs window.  Each page
   // gets an equal slice (minimum 2 s) so a multi-page slide still cycles at a
   // readable pace while the whole slide fits roughly in one auto-advance tick.
+  // Page cycling runs even when paused — "pause" only stops slide-to-slide
+  // advance, not sub-page rotation within the current slide.
   const int pages = kSlides[s_current]->pageCount(snap);
   if (pages > 1) {
     uint32_t perPage = kAutoAdvanceMs / static_cast<uint32_t>(pages);
@@ -360,13 +386,22 @@ void slideshowTick(bool allowAdvance) {
         s_fullRedraw = true;   // full content redraw for the new page
         return;
       }
-      // Last page done — fall through to advance to the next slide.
+      // Last page done — wrap back to page 0 when paused (stay on this slide).
+      if (s_paused) {
+        s_page = 0;
+        s_pageStartMs = nowMs;
+        s_fullRedraw = true;
+        return;
+      }
+      // Not paused — fall through to advance to the next slide.
     } else {
       return;   // still within this page's time slice
     }
   } else if (nowMs - s_slideStartMs < kAutoAdvanceMs) {
     return;     // single-page slide, still within its window
   }
+
+  if (s_paused) return;   // don't advance to the next slide while paused
 
   // Advance to the next visible slide.
   const int next = nextVisible(s_current, +1, snap);
@@ -412,6 +447,15 @@ bool slideshowHandleTouch(uint16_t x, uint16_t y) {
     s_slideStartMs = millis();
     s_pageStartMs = s_slideStartMs;
     drawFooter(true);
+    // When pausing on the Users slide, immediately request a fast sessions poll
+    // so user data refreshes within ~2 s rather than waiting for the normal
+    // round-robin (~24 s).  The fast-poll mechanism inserts a bonus step without
+    // disrupting the round-robin, so health and other endpoints are not starved.
+    if (s_paused &&
+        strcmp(kSlides[s_current]->name(), "USERS") == 0) {
+      ubersdrApiRequestSessionsFastPoll();
+      s_lastSessionsPriorityMs = millis();   // prevent immediate re-trigger
+    }
   }
   return true;
 }

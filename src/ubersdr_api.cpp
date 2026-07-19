@@ -61,9 +61,10 @@ UberSDRSnapshot   g_work;
 UberSDRSnapshot   g_snap;
 SemaphoreHandle_t g_snapMutex    = nullptr;
 
-uint8_t           g_step         = 0;
-bool              g_forceRefresh = false;
-int               g_spectrumBand = 0;   // round-robin index for per-band FFT
+uint8_t           g_step              = 0;
+bool              g_forceRefresh      = false;
+volatile bool     g_sessionsFastPoll  = false;  // insert extra sessions step ASAP
+int               g_spectrumBand      = 0;   // round-robin index for per-band FFT
 
 // ── Task handle + HWM ────────────────────────────────────────────────────────
 TaskHandle_t      g_apiTaskHandle = nullptr;
@@ -425,6 +426,10 @@ void pollSessions() {
   filter["audio_kbps"] = true;
   filter["waterfall_kbps"] = true;
   filter["total_kbps"] = true;
+  // non_bypassed_users is an object keyed by UUID strings.  ArduinoJson v7 has
+  // no wildcard syntax for arbitrary object keys, so pass the whole map through
+  // with `true`.  It is small (one entry per connected user) so RAM is fine.
+  filter["non_bypassed_users"] = true;
   JsonObject fSess = filter["sessions"].add<JsonObject>();
   fSess["is_internal"] = true;
   fSess["is_bypassed"] = true;
@@ -451,9 +456,71 @@ void pollSessions() {
     g_work.totalKbps        = doc["total_kbps"]        | 0;
     g_work.netValid = true;
 
-    debugLogf("sessions: users=%d bypass=%d ext=%d net=%dkbps (compact)",
+    // ── Per-user detail from non_bypassed_users map ──
+    // Each key is a UUID; each value is { country, country_code, connected_since }.
+    // Parse up to kMaxUserDetails entries; extras are silently dropped.
+    int nd = 0;
+    JsonObject nbUsers = doc["non_bypassed_users"].as<JsonObject>();
+    if (!nbUsers.isNull()) {
+      for (JsonPair kv : nbUsers) {
+        if (nd >= kMaxUserDetails) break;
+        JsonObject u = kv.value().as<JsonObject>();
+        if (u.isNull()) continue;
+
+        UserDetail& ud = g_work.userDetails[nd];
+
+        // Country name — truncate to fit char[28].
+        const char* country = u["country"] | "";
+        strncpy(ud.country, country, sizeof(ud.country) - 1);
+        ud.country[sizeof(ud.country) - 1] = '\0';
+
+        // Country code — truncate to fit char[4].
+        const char* cc = u["country_code"] | "";
+        strncpy(ud.countryCode, cc, sizeof(ud.countryCode) - 1);
+        ud.countryCode[sizeof(ud.countryCode) - 1] = '\0';
+
+        // connected_since: ISO-8601 UTC string → time_t via sscanf.
+        // Format: "2026-07-19T08:30:00Z"
+        ud.connectedSince = 0;
+        const char* cs = u["connected_since"] | "";
+        if (cs && cs[0]) {
+          int yr = 0, mo = 0, dy = 0, hr = 0, mn = 0, sc = 0;
+          if (sscanf(cs, "%d-%d-%dT%d:%d:%d", &yr, &mo, &dy, &hr, &mn, &sc) == 6) {
+            // Convert to time_t using mktime with UTC (no DST).
+            struct tm t = {};
+            t.tm_year = yr - 1900;
+            t.tm_mon  = mo - 1;
+            t.tm_mday = dy;
+            t.tm_hour = hr;
+            t.tm_min  = mn;
+            t.tm_sec  = sc;
+            // timegm is not available on all platforms; use mktime + timezone offset.
+            // On ESP32 with NTP, timezone is UTC (TZ not set), so mktime ≈ timegm.
+            ud.connectedSince = mktime(&t);
+          }
+        }
+
+        // Frequency in Hz (0 when spectrum-only / no audio session).
+        ud.frequencyHz = u["frequency"] | (uint32_t)0;
+
+        // Mode string — force uppercase, truncate to fit char[8].
+        const char* modeStr = u["mode"] | "";
+        int mi = 0;
+        while (modeStr[mi] && mi < (int)(sizeof(ud.mode) - 1)) {
+          ud.mode[mi] = (modeStr[mi] >= 'a' && modeStr[mi] <= 'z')
+                        ? modeStr[mi] - 32 : modeStr[mi];
+          mi++;
+        }
+        ud.mode[mi] = '\0';
+
+        nd++;
+      }
+    }
+    g_work.userDetailCount = nd;
+
+    debugLogf("sessions: users=%d bypass=%d ext=%d net=%dkbps details=%d (compact)",
               g_work.userCount, g_work.bypassCount,
-              g_work.externalSessions, g_work.totalKbps);
+              g_work.externalSessions, g_work.totalKbps, nd);
     g_work.lastSuccessMs = millis();
     return;
   }
@@ -1042,6 +1109,20 @@ void apiTask(void* /*param*/) {
 
   for (;;) {
     if (WiFi.status() == WL_CONNECTED) {
+      // Fast-poll: if the display has requested an extra sessions fetch (e.g.
+      // user paused on the Users slide), run pollSessions() as a bonus step
+      // without advancing g_step so the normal round-robin is not disrupted.
+      // The flag is cleared here; the display sets it again periodically.
+      if (g_sessionsFastPoll) {
+        g_sessionsFastPoll = false;
+        pollSessions();
+        xSemaphoreTake(g_snapMutex, portMAX_DELAY);
+        g_snap = g_work;
+        xSemaphoreGive(g_snapMutex);
+        vTaskDelay(pdMS_TO_TICKS(kStepIntervalMs));
+        continue;   // go back to top; normal step fires on next iteration
+      }
+
       const bool wasForced = g_forceRefresh;
       g_forceRefresh = false;
       runStep(g_step);   // HTTP fetch — writes to g_work, no mutex held
@@ -1149,6 +1230,19 @@ void ubersdrApiGetHealth(bool& healthValid, uint8_t& healthOverall) {
 void ubersdrApiRefresh() {
   g_step        = 0;
   g_forceRefresh = true;
+}
+
+// Jump the poll queue so the sessions endpoint fires on the very next tick.
+// Used when the user pauses on the Users slide so data refreshes within ~2 s
+// instead of waiting up to 24 s for the normal round-robin to reach it.
+void ubersdrApiPrioritiseSessions() {
+  g_step         = kStepSessions;
+  g_forceRefresh = true;   // skip the inter-step delay
+}
+
+// Request an extra sessions poll without disrupting the normal round-robin.
+void ubersdrApiRequestSessionsFastPoll() {
+  g_sessionsFastPoll = true;
 }
 
 uint32_t ubersdrApiGetStackHwm() {
