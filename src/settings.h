@@ -6,6 +6,9 @@ struct AppSettings {
   String   wifiSsid;
   String   wifiPassword;
   uint8_t  brightnessPercent;
+  bool     autoBrightness;      // adjust backlight from front LDR (GPIO 34)
+  uint16_t screenOffTimeoutSec; // 0 = disabled; screen blanks after this many seconds
+  bool     ledEnabled;          // onboard RGB status LED on/off
   bool     keepHotspotOn;
 
   // ── UberSDR server (overview display) ──

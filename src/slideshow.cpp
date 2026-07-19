@@ -65,6 +65,7 @@ bool     s_drewPlaceholder = false;  // current slide was drawn without data
 String   s_lastClockStr;             // last drawn HH:MM:SS to avoid flicker
 String   s_lastUsersStr;             // last drawn "N/max" user count
 String   s_lastHealthStr;            // last drawn health indicator to avoid flicker
+String   s_lastIpStr;                // last drawn IP address in footer
 
 // ── Slide selection helpers ───────────────────────────────────────────────────
 bool slideVisible(int idx, const UberSDRSnapshot& snap) {
@@ -196,26 +197,61 @@ void drawHeader(const UberSDRSnapshot& snap, bool full) {
 }
 
 void drawFooter(bool full) {
-  if (!full) return;
   TFT_eSPI& tft = *s_tft;
-  const int16_t y = kScreenH - kFooterH;
-  tft.fillRect(0, y, kScreenW, kFooterH, kColPanel);
-  tft.drawFastHLine(0, y, kScreenW, kColCardHi);
+  const int16_t y  = kScreenH - kFooterH;
+  const int16_t cy = y + kFooterH / 2;
 
-  tft.setTextColor(kColMuted, kColPanel);
-  tft.setTextDatum(ML_DATUM);
-  tft.drawString("< prev", 8, y + kFooterH / 2, 2);
+  if (full) {
+    tft.fillRect(0, y, kScreenW, kFooterH, kColPanel);
+    tft.drawFastHLine(0, y, kScreenW, kColCardHi);
 
-  // Centre: slide counter + pause state, e.g. "3/10  auto" or "3/10  paused"
-  char centre[24];
-  snprintf(centre, sizeof(centre), "%d/%d  %s",
-           s_current + 1, kSlideCount,
-           s_paused ? "paused" : "auto");
-  tft.setTextDatum(MC_DATUM);
-  tft.drawString(centre, kScreenW / 2, y + kFooterH / 2, 2);
+    tft.setTextColor(kColMuted, kColPanel);
+    tft.setTextDatum(ML_DATUM);
+    tft.drawString("< prev", 8, cy, 2);
 
-  tft.setTextDatum(MR_DATUM);
-  tft.drawString("next >", kScreenW - 8, y + kFooterH / 2, 2);
+    tft.setTextDatum(MR_DATUM);
+    tft.drawString("next >", kScreenW - 8, cy, 2);
+
+    s_lastIpStr = "";   // force IP + counter repaint below
+  }
+
+  // Centre zone: slide counter (left-of-centre) + IP (right-of-centre).
+  // Both are live-updated in-place on every clock tick.
+  // Counter: "3/10  auto" or "3/10  paused" — centred around x=90.
+  {
+    char counter[20];
+    snprintf(counter, sizeof(counter), "%d/%d  %s",
+             s_current + 1, kSlideCount,
+             s_paused ? "paused" : "auto");
+    const String counterStr(counter);
+
+    // IP string (or "--" when not connected).
+    const String rawIp = WiFi.localIP().toString();
+    const String ipStr = (rawIp == "(IP unset)" || WiFi.status() != WL_CONNECTED)
+                         ? "--" : rawIp;
+
+    // Combine into one change-key so both repaint together.
+    const String key = counterStr + "|" + ipStr;
+    if (key != s_lastIpStr) {
+      // Clear the middle zone (between "< prev" and "next >").
+      constexpr int16_t kMidX = 52;
+      constexpr int16_t kMidW = kScreenW - 104;   // 216 px
+      tft.fillRect(kMidX, y + 2, kMidW, kFooterH - 4, kColPanel);
+
+      // Counter — left-aligned in the middle zone.
+      tft.setTextColor(kColMuted, kColPanel);
+      tft.setTextDatum(ML_DATUM);
+      tft.drawString(counterStr, kMidX + 2, cy, 2);
+
+      // IP — right-aligned in the middle zone.
+      const uint16_t ipCol = (WiFi.status() == WL_CONNECTED) ? kColAccent : kColMuted;
+      tft.setTextColor(ipCol, kColPanel);
+      tft.setTextDatum(MR_DATUM);
+      tft.drawString(ipStr, kMidX + kMidW - 2, cy, 2);
+
+      s_lastIpStr = key;
+    }
+  }
 }
 
 void clearContent() {
@@ -237,6 +273,7 @@ void slideshowBegin(TFT_eSPI& tft) {
   s_lastClockStr  = "";
   s_lastUsersStr  = "";
   s_lastHealthStr = "";
+  s_lastIpStr     = "";
 }
 
 void slideshowActivate() {
@@ -297,10 +334,11 @@ void slideshowTick(bool allowAdvance) {
   if (!s_tft) return;
   const uint32_t nowMs = millis();
 
-  // Header clock tick (independent of auto-advance).
+  // Header clock tick + footer IP refresh (independent of auto-advance).
   if (nowMs - s_lastClockMs >= kClockTickMs) {
     s_lastClockMs = nowMs;
     drawHeader(getUberSDRSnapshot(), false);
+    drawFooter(false);
   }
 
   if (!allowAdvance || s_paused) return;

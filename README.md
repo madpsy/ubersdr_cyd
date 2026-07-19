@@ -18,6 +18,25 @@ No toolchain, no drivers, no cloning — flash straight from Chrome or Edge over
 
 If you leave the form blank the device starts the `UberSDR-Setup` hotspot and you configure it on-screen or via browser as described below. Under the hood the baked-in settings are written to a dedicated `usercfg` flash partition which the firmware imports into NVS on first boot and then erases.
 
+### Settings page
+
+Once the device is on your network, open its settings page in any browser:
+
+- **`http://ubersdr-cyd.local/`** — works on most networks (mDNS / Bonjour)
+- **`http://<IP address>/`** — the IP is shown in the bottom-right of the slideshow footer
+
+From the settings page you can change:
+
+| Setting | Description |
+|---|---|
+| **Wi-Fi SSID / Password** | Connect to a different network |
+| **UberSDR host / port / password** | Point the display at your UberSDR server |
+| **Backlight brightness** | Manual brightness level (5–100 %) |
+| **Auto brightness** | Adjusts backlight automatically using the front light sensor; the manual slider becomes the maximum |
+| **Screen off after** | Blank the screen after N seconds of inactivity (0 = never); tap anywhere or send a `/notify` webhook to wake it |
+| **Enable status LED** | Turn the onboard RGB health-status LED on or off |
+| **Keep setup hotspot always on** | Leave the `UberSDR-Setup` AP running even after joining your Wi-Fi |
+
 ### Option 2 — Build from source
 
 #### 1. Clone and configure

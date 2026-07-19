@@ -104,7 +104,7 @@ String pageHtml(const String& message = "") {
 
   html += F("<!doctype html><html><head>"
             "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-            "<title>UberSDR Setup</title><style>");
+            "<title>UberSDR CYD Config</title><style>");
   html += F("body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;"
             "margin:0;background:#10151c;color:#f3f7fb}");
   html += F("main{max-width:640px;margin:0 auto;padding:24px}");
@@ -126,7 +126,7 @@ String pageHtml(const String& message = "") {
   html += F("small{color:#aeb8c4}");
   html += F("</style></head><body><main>");
 
-  html += F("<h1>UberSDR Setup</h1>");
+  html += F("<h1>UberSDR CYD Config</h1>");
 
   if (message.length() > 0) {
     html += F("<div class='card ok'>");
@@ -209,14 +209,55 @@ String pageHtml(const String& message = "") {
   html += F("</div>");
 
   html += F("<div class='card'><h2>Display</h2>");
-  html += F("<label for='bright'>Backlight brightness: "
-            "<span id='bval'>");
+  html += F("<label><input name='autobright' type='checkbox' value='1'");
+  html += checked(settings.autoBrightness);
+  html += F(">Auto brightness (uses front light sensor)</label>"
+            "<small>When enabled the backlight tracks ambient light automatically. "
+            "The manual slider below is used as the maximum brightness.</small>");
+  html += F("<label for='bright'>Backlight brightness"
+            "<span id='blabel'>");
+  html += settings.autoBrightness ? F(" (max):") : F(":");
+  html += F("</span> <span id='bval'>");
   html += String(settings.brightnessPercent);
   html += F("%</span></label>"
             "<input id='bright' name='bright' type='range' min='5' max='100' value='");
   html += String(settings.brightnessPercent);
   html += F("' oninput=\"document.getElementById('bval').textContent=this.value+'%'\">");
-  html += F("</div>");
+  // CYD front LDR is on GPIO 34 (ADC1_CH6, 12-bit, 0-4095).
+  // The LDR pulls the pin toward GND when bright (lower raw = more light).
+  // Attenuation is set to ADC_0db globally in displayBegin() for best
+  // resolution on this low-voltage circuit (~0 bright, ~750 fully dark).
+  {
+    constexpr uint8_t  kLdrPin   = 34;
+    constexpr uint8_t  kSamples  = 16;
+    constexpr uint32_t kSettleUs = 50;
+    constexpr int      kDarkMax  = 750;  // raw ADC when fully covered (ADC_0db)
+    int32_t sum = 0;
+    for (uint8_t i = 0; i < kSamples; ++i) {
+      sum += analogRead(kLdrPin);
+      delayMicroseconds(kSettleUs);
+    }
+    const int raw     = static_cast<int>(sum / kSamples);
+    const int clamped = constrain(raw, 0, kDarkMax);
+    const int pct     = map(clamped, 0, kDarkMax, 100, 0);  // 100=bright, 0=dark
+    html += F("<div style='margin-top:10px'>Ambient light: <code>");
+    html += String(pct);
+    html += F("%</code> <small>(raw ADC: ");
+    html += String(raw);
+    html += F(")</small></div>");
+    }
+    html += F("<label for='screentimeout'>Screen off after (seconds, 0&nbsp;=&nbsp;never):</label>"
+              "<input id='screentimeout' name='screentimeout' type='number' "
+              "min='0' max='3600' value='");
+    html += String(settings.screenOffTimeoutSec);
+    html += F("'>");
+    html += F("<label><input name='leden' type='checkbox' value='1'");
+    html += checked(settings.ledEnabled);
+    html += F(">Enable status LED</label>"
+              "<small>Onboard RGB LED reflects UberSDR health: "
+              "blue&nbsp;=&nbsp;waiting, green&nbsp;=&nbsp;OK, "
+              "amber&nbsp;=&nbsp;warning, red&nbsp;=&nbsp;critical.</small>");
+    html += F("</div>");
 
   html += F("<button type='submit'>Save settings</button>");
   html += F("</form>");
@@ -251,6 +292,10 @@ void handleSave() {
   } else if (submittedPass.length() > 0) {
     settings.wifiPassword = submittedPass;
   }
+  settings.autoBrightness = server.hasArg("autobright");
+  settings.screenOffTimeoutSec = static_cast<uint16_t>(
+      constrain(server.arg("screentimeout").toInt(), 0L, 3600L));
+  settings.ledEnabled = server.hasArg("leden");
   settings.keepHotspotOn = server.hasArg("keepap");
   settings.brightnessPercent = static_cast<uint8_t>(
       constrain(server.arg("bright").toInt(), 5L, 100L));

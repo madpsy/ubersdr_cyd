@@ -1,6 +1,7 @@
 #include "notifications.h"
 
 #include "debug_log.h"
+#include "display.h"      // wakeDisplay()
 #include "slide_base.h"   // palette, screen geometry, drawText
 
 namespace {
@@ -121,6 +122,9 @@ void notificationsPush(const String& channel, const String& message) {
   ++g_count;
   g_dirty = true;   // repaint so the +N badge updates
   debugLogf("notify: [%s] %s (queued=%d)", channel.c_str(), msg.c_str(), g_count);
+
+  // Wake the screen if it has blanked due to inactivity.
+  wakeDisplay();
 }
 
 bool notificationsActive() {

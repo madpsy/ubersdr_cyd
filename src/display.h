@@ -19,3 +19,7 @@ void requestDisplayRedraw();
 
 // Show a full-screen message (used by reset_button).
 void displayShowMessage(const String& title, const String& subtitle);
+
+// Wake the screen immediately (e.g. on incoming notification) and reset the
+// screen-off inactivity timer.  Safe to call when the screen is already on.
+void wakeDisplay();

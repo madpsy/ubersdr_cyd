@@ -9,11 +9,9 @@
 #include "ubersdr_api.h"
 
 namespace {
-constexpr uint32_t kLoopDelayMs   = 10;
-constexpr uint32_t kLedUpdateMs   = 2000;  // only update LED every 2 s
-uint32_t           g_lastLedMs    = 0;
-bool               g_lastLedValid = false;
-uint8_t            g_lastLedState = 255;   // force first update
+constexpr uint32_t kLoopDelayMs = 10;
+constexpr uint32_t kLedUpdateMs = 2000;  // re-evaluate LED every 2 s
+uint32_t           g_lastLedMs  = 0;
 }
 
 void setup() {
@@ -40,6 +38,7 @@ void loop() {
   }
 
   // Update the onboard RGB LED to reflect health status (throttled to 2 s).
+  // Always call statusLedUpdate() so ledEnabled changes take effect promptly.
   // We read only the two health fields via a small helper to avoid placing the
   // full UberSDRSnapshot (several KB) on the already-tight loopTask stack.
   const uint32_t nowMs = millis();
@@ -48,11 +47,7 @@ void loop() {
     bool    hValid;
     uint8_t hOverall;
     ubersdrApiGetHealth(hValid, hOverall);
-    if (hValid != g_lastLedValid || hOverall != g_lastLedState) {
-      g_lastLedValid = hValid;
-      g_lastLedState = hOverall;
-      statusLedUpdate(hValid, hOverall);
-    }
+    statusLedUpdate(hValid, hOverall);
   }
 
   delay(kLoopDelayMs);

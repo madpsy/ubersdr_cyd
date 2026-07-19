@@ -227,6 +227,10 @@ void settingsBegin() {
 
   currentSettings.brightnessPercent =
       preferences.getUChar("bright", static_cast<uint8_t>(DEFAULT_BRIGHTNESS));
+  currentSettings.autoBrightness = preferences.getBool("autobright", false);
+  currentSettings.screenOffTimeoutSec =
+      preferences.getUShort("screentimeout", 0);
+  currentSettings.ledEnabled = preferences.getBool("leden", true);
   currentSettings.keepHotspotOn = preferences.getBool("apalwayson", false);
 
   normalizeSettings(currentSettings);
@@ -249,8 +253,11 @@ void saveSettings(const AppSettings& settings) {
   // Save to NVS (on-screen keyboard / web portal changes go here)
   preferences.putString("ssid",      currentSettings.wifiSsid);
   preferences.putString("pass",      currentSettings.wifiPassword);
-  preferences.putUChar("bright",     currentSettings.brightnessPercent);
-  preferences.putBool("apalwayson",  currentSettings.keepHotspotOn);
+  preferences.putUChar("bright",        currentSettings.brightnessPercent);
+  preferences.putBool("autobright",     currentSettings.autoBrightness);
+  preferences.putUShort("screentimeout",currentSettings.screenOffTimeoutSec);
+  preferences.putBool("leden",          currentSettings.ledEnabled);
+  preferences.putBool("apalwayson",     currentSettings.keepHotspotOn);
 
   preferences.putString("ushost",    currentSettings.ubersdrHost);
   preferences.putUShort("usport",    currentSettings.ubersdrPort);

@@ -315,6 +315,27 @@ uint32_t g_lastTouchActionMs = 0;
 // Notification toast overlay state (see notifications.h contract).
 bool g_toastWasActive = false;
 
+// Auto-brightness: how often to re-sample the LDR and update the backlight.
+constexpr uint32_t kAutoBrightIntervalMs = 2000;
+uint32_t g_lastAutoBrightMs = 0;
+
+// ── Screen-off / wake state ───────────────────────────────────────────────────
+bool     g_screenOff      = false;
+uint32_t g_lastActivityMs = 0;   // reset on touch or wakeDisplay()
+uint8_t  g_blDuty         = 255; // last non-zero backlight duty (restored on wake)
+
+// Write a duty value to the backlight LEDC channel.
+void setBacklightDuty(uint8_t duty) {
+#ifdef TFT_BL
+  constexpr uint8_t  kBlChannel    = 0;
+  constexpr uint32_t kBlFrequency  = 5000;
+  constexpr uint8_t  kBlResolution = 8;
+  ledcSetup(kBlChannel, kBlFrequency, kBlResolution);
+  ledcAttachPin(TFT_BL, kBlChannel);
+  ledcWrite(kBlChannel, duty);
+#endif
+}
+
 // Render the toast overlay and repaint the underlying screen when the last
 // toast is dismissed.  Only called for screens that may show toasts.
 // underlayRepainted = the caller just repainted the screen beneath the toast.
@@ -586,6 +607,18 @@ void handleTouch() {
       nowMs - g_lastTouchActionMs >= kTouchDebounceMs) {
     g_lastTouchActionMs = nowMs;
 
+    // If the screen is off, this tap wakes it — consume the tap entirely.
+    if (g_screenOff) {
+      g_screenOff = false;
+      g_lastActivityMs = nowMs;
+      setBacklightDuty(g_blDuty);
+      g_touchWasDown = touched;
+      return;
+    }
+
+    // Screen is on — record activity and dispatch normally.
+    g_lastActivityMs = nowMs;
+
     switch (g_screen) {
       case kScreenStatus:
         if (ty < 116) {
@@ -633,11 +666,37 @@ void handleTouch() {
   g_touchWasDown = touched;
 }
 
+// ── LDR helpers ───────────────────────────────────────────────────────────────
+
+constexpr uint8_t  kLdrPin      = 34;
+constexpr uint8_t  kLdrSamples  = 8;
+constexpr uint32_t kLdrSettleUs = 50;
+// Practical ADC range with ADC_0db attenuation: 0 (bright) … ~750 (dark).
+constexpr int      kLdrDarkMax  = 750;
+
+// Returns ambient light as 0 (dark) … 100 (bright).
+int readLdrPercent() {
+  int32_t sum = 0;
+  for (uint8_t i = 0; i < kLdrSamples; ++i) {
+    sum += analogRead(kLdrPin);
+    delayMicroseconds(kLdrSettleUs);
+  }
+  const int raw     = static_cast<int>(sum / kLdrSamples);
+  const int clamped = constrain(raw, 0, kLdrDarkMax);
+  return static_cast<int>(map(clamped, 0, kLdrDarkMax, 100, 0));
+}
+
 }  // namespace
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
 void displayBegin() {
+  // Configure the front LDR (GPIO 34) ADC attenuation before any analogRead.
+  // ADC_0db = 0-1.1 V input range, giving the best resolution for the LDR's
+  // low-voltage swing (~0 raw in daylight, ~750 raw fully covered).
+  pinMode(kLdrPin, INPUT);
+  analogSetPinAttenuation(kLdrPin, ADC_0db);
+
   tft.init();
   tft.setRotation(kRotation);
   tft.fillScreen(kBg);
@@ -662,10 +721,44 @@ void displayBegin() {
   // Ignore any touch lingering from the calibration wizard for 1.5 s.
   g_lastTouchActionMs = millis() + 1500;
   g_touchWasDown = false;
+
+  // Start the inactivity timer now so the screen doesn't blank immediately.
+  g_lastActivityMs = millis();
 }
 
 void displayUpdate(const SystemSnapshot& snap) {
   handleTouch();
+
+  // ── Screen-off timeout & auto-brightness poll ─────────────────────────────
+  {
+    const uint32_t nowMs = millis();
+    const AppSettings& s = getSettings();
+
+    // Screen-off timeout: blank the backlight after inactivity.
+    if (!g_screenOff && s.screenOffTimeoutSec > 0 &&
+        nowMs - g_lastActivityMs >= static_cast<uint32_t>(s.screenOffTimeoutSec) * 1000UL) {
+      g_screenOff = true;
+      setBacklightDuty(0);
+    }
+
+    // Auto-brightness: re-sample LDR periodically (only when screen is on).
+    if (!g_screenOff && s.autoBrightness &&
+        nowMs - g_lastAutoBrightMs >= kAutoBrightIntervalMs) {
+      g_lastAutoBrightMs = nowMs;
+      const uint8_t maxBright = constrain(s.brightnessPercent,
+                                          static_cast<uint8_t>(5),
+                                          static_cast<uint8_t>(100));
+      const int ldrPct = readLdrPercent();
+      const int scaled = map(ldrPct, 0, 100, 5, maxBright);
+      uint8_t duty = static_cast<uint8_t>(
+          map(constrain(scaled, 5, 100), 0, 100, 0, 255));
+#if TFT_BACKLIGHT_ON == LOW
+      duty = 255 - duty;
+#endif
+      g_blDuty = duty;
+      setBacklightDuty(duty);
+    }
+  }
 
   // Auto-navigate to the overview slideshow on the rising edge of WiFi becoming
   // connected, regardless of which screen we're currently on (handles both the
@@ -742,24 +835,39 @@ void displayUpdate(const SystemSnapshot& snap) {
 void applyDisplaySettings() {
   const AppSettings& settings = getSettings();
 
-#ifdef TFT_BL
-  constexpr uint8_t  kBlChannel    = 0;
-  constexpr uint32_t kBlFrequency  = 5000;
-  constexpr uint8_t  kBlResolution = 8;
+  uint8_t brightness = constrain(settings.brightnessPercent,
+                                 static_cast<uint8_t>(5),
+                                 static_cast<uint8_t>(100));
 
-  const uint8_t brightness = constrain(settings.brightnessPercent,
-                                       static_cast<uint8_t>(5),
-                                       static_cast<uint8_t>(100));
+  if (settings.autoBrightness) {
+    // Scale the manual brightness setting as the maximum; dim proportionally
+    // to ambient light (bright room → full max, dark room → 5 % floor).
+    const int ldrPct = readLdrPercent();                    // 0=dark … 100=bright
+    const int scaled = map(ldrPct, 0, 100, 5, brightness); // 5 % floor
+    brightness = static_cast<uint8_t>(constrain(scaled, 5, 100));
+  }
+
   uint8_t duty = static_cast<uint8_t>(map(brightness, 0, 100, 0, 255));
 #if TFT_BACKLIGHT_ON == LOW
   duty = 255 - duty;
 #endif
-  ledcSetup(kBlChannel, kBlFrequency, kBlResolution);
-  ledcAttachPin(TFT_BL, kBlChannel);
-  ledcWrite(kBlChannel, duty);
-#endif
+  g_blDuty = duty;   // cache so wake can restore it
+  if (!g_screenOff) {
+    setBacklightDuty(duty);
+  }
 
   g_dirty = true;
+}
+
+void wakeDisplay() {
+  g_lastActivityMs = millis();
+  if (g_screenOff) {
+    g_screenOff = false;
+    setBacklightDuty(g_blDuty);
+    // Force a full redraw so the content is fresh when the screen comes back on.
+    g_dirty = true;
+    if (g_screen == kScreenSlideShow) slideshowForceRedraw();
+  }
 }
 
 void requestDisplayRedraw() {
