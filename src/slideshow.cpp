@@ -53,6 +53,13 @@ constexpr uint32_t kClockTickMs   = 1000;   // header clock refresh
 // ── State ─────────────────────────────────────────────────────────────────────
 TFT_eSPI* s_tft = nullptr;
 
+// Single snapshot copy that lives in BSS (static storage), refreshed once per
+// public entry point.  Keeping it here — rather than on the stack — prevents
+// the ~6 KB UberSDRSnapshot from being allocated multiple times simultaneously
+// on the Arduino loopTask stack (default 8 KB), which caused stack-canary
+// watchpoint panics on Core 1.
+UberSDRSnapshot s_snap;
+
 int      s_current       = 0;        // index into kSlides
 int      s_page          = 0;        // current page within a multi-page slide
 bool     s_paused        = false;    // auto-advance paused by centre tap
@@ -281,7 +288,8 @@ void slideshowBegin(TFT_eSPI& tft) {
 }
 
 void slideshowActivate() {
-  const UberSDRSnapshot& snap = getUberSDRSnapshot();
+  s_snap = getUberSDRSnapshot();
+  const UberSDRSnapshot& snap = s_snap;
   // Land on the first slide that has data.
   if (!slideVisible(s_current, snap)) {
     s_current = nextVisible(s_current, +1, snap);
@@ -295,7 +303,8 @@ void slideshowActivate() {
 
 bool slideshowDraw() {
   if (!s_tft) return false;
-  const UberSDRSnapshot& snap = getUberSDRSnapshot();
+  s_snap = getUberSDRSnapshot();
+  const UberSDRSnapshot& snap = s_snap;
 
   const bool full = s_fullRedraw;
   bool contentPainted = false;
@@ -346,10 +355,15 @@ void slideshowTick(bool allowAdvance) {
   if (!s_tft) return;
   const uint32_t nowMs = millis();
 
+  // Refresh the shared snapshot once for this tick.  All helpers below use
+  // s_snap by const-ref so the ~6 KB struct is never duplicated on the stack.
+  s_snap = getUberSDRSnapshot();
+  const UberSDRSnapshot& snap = s_snap;
+
   // Header clock tick + footer IP refresh (independent of auto-advance).
   if (nowMs - s_lastClockMs >= kClockTickMs) {
     s_lastClockMs = nowMs;
-    drawHeader(getUberSDRSnapshot(), false);
+    drawHeader(snap, false);
     drawFooter(false);
   }
 
@@ -366,8 +380,6 @@ void slideshowTick(bool allowAdvance) {
   }
 
   if (!allowAdvance) return;
-
-  const UberSDRSnapshot& snap = getUberSDRSnapshot();
 
   // Pages within the current slide share the kAutoAdvanceMs window.  Each page
   // gets an equal slice (minimum 2 s) so a multi-page slide still cycles at a
@@ -420,7 +432,8 @@ void slideshowForceRedraw() {
 
 bool slideshowHandleTouch(uint16_t x, uint16_t y) {
   (void)y;
-  const UberSDRSnapshot& snap = getUberSDRSnapshot();
+  s_snap = getUberSDRSnapshot();
+  const UberSDRSnapshot& snap = s_snap;
 
   if (x < kScreenW / 3) {
     // Left third → previous slide.
