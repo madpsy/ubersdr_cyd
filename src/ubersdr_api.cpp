@@ -1213,11 +1213,10 @@ void ubersdrApiTaskBegin() {
   debugLog("ubersdr api task started on Core 0");
 }
 
-UberSDRSnapshot getUberSDRSnapshot() {
+void getUberSDRSnapshot(UberSDRSnapshot& out) {
   xSemaphoreTake(g_snapMutex, portMAX_DELAY);
-  const UberSDRSnapshot copy = g_snap;
+  out = g_snap;
   xSemaphoreGive(g_snapMutex);
-  return copy;
 }
 
 void ubersdrApiGetHealth(bool& healthValid, uint8_t& healthOverall) {

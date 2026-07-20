@@ -288,7 +288,7 @@ void slideshowBegin(TFT_eSPI& tft) {
 }
 
 void slideshowActivate() {
-  s_snap = getUberSDRSnapshot();
+  getUberSDRSnapshot(s_snap);
   const UberSDRSnapshot& snap = s_snap;
   // Land on the first slide that has data.
   if (!slideVisible(s_current, snap)) {
@@ -303,7 +303,7 @@ void slideshowActivate() {
 
 bool slideshowDraw() {
   if (!s_tft) return false;
-  s_snap = getUberSDRSnapshot();
+  getUberSDRSnapshot(s_snap);
   const UberSDRSnapshot& snap = s_snap;
 
   const bool full = s_fullRedraw;
@@ -357,7 +357,7 @@ void slideshowTick(bool allowAdvance) {
 
   // Refresh the shared snapshot once for this tick.  All helpers below use
   // s_snap by const-ref so the ~6 KB struct is never duplicated on the stack.
-  s_snap = getUberSDRSnapshot();
+  getUberSDRSnapshot(s_snap);
   const UberSDRSnapshot& snap = s_snap;
 
   // Header clock tick + footer IP refresh (independent of auto-advance).
@@ -432,7 +432,7 @@ void slideshowForceRedraw() {
 
 bool slideshowHandleTouch(uint16_t x, uint16_t y) {
   (void)y;
-  s_snap = getUberSDRSnapshot();
+  getUberSDRSnapshot(s_snap);
   const UberSDRSnapshot& snap = s_snap;
 
   if (x < kScreenW / 3) {
